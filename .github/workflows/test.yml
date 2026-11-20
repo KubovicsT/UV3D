@@ -33,3 +33,16 @@ jobs:
               throw "$file has PowerShell parse errors: $($errors | Out-String)"
             }
           }
+      - name: Bootstrap folder-local runtime (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Install-UV3D.ps1 -NoLaunch
+          if ($LASTEXITCODE -ne 0) { throw 'Portable installer failed' }
+      - name: Smoke test portable Python and desktop UI (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          & .\\runtime\\python\\python.exe -c "from PySide6.QtWidgets import QApplication; from uv3d.app import MainWindow; a=QApplication([]); w=MainWindow(); assert w.windowTitle().startswith('UV3D'); w.close()"
+          if ($LASTEXITCODE -ne 0) { throw 'Portable Python GUI smoke failed' }
