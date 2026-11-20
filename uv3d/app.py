@@ -48,6 +48,7 @@ class MainWindow(QMainWindow):
         self.job_path: Path | None = None
         self.job_data: dict | None = None
         self.worker_thread = None
+        self.worker = None
         self.sim_position = 0
         self.sim_timer = QTimer(self)
         self.sim_timer.timeout.connect(self.simulation_tick)
@@ -229,6 +230,7 @@ class MainWindow(QMainWindow):
         self.log.appendPlainText(f"Generating offline export: {out}")
         thread = QThread(self)
         worker = SliceWorker(self.mesh_path, out, settings)
+        self.worker = worker  # Keep Python receiver alive until QThread has exited.
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(lambda current, total: self.progress.setValue(round(100 * current / total)))
@@ -244,6 +246,7 @@ class MainWindow(QMainWindow):
 
     def thread_finished(self):
         self.worker_thread = None
+        self.worker = None
         self.export_button.setEnabled(self.mesh_path is not None)
 
     def export_finished(self, job_path: str):
@@ -291,6 +294,13 @@ class MainWindow(QMainWindow):
         self.sim_detail.setText(f"Simulated layer {self.sim_position}/{total}; no machine commands issued.")
         if self.sim_position >= total:
             self.sim_timer.stop()
+
+    def closeEvent(self, event):
+        if self.worker_thread is not None and self.worker_thread.isRunning():
+            QMessageBox.warning(self, "Export in progress", "Finish exporting layers before closing UV3D.")
+            event.ignore()
+            return
+        event.accept()
 
     def update_app(self):
         script = ROOT / "Update-UV3D.ps1"
