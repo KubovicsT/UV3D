@@ -105,6 +105,7 @@ class PrintSimulation:
         self.move_speed_mm_s = self._validate_speed(move_speed_mm_s)
         self.segments: list[MotionSegment] = []
         self._segment_end_s: list[float] = []
+        self._segment_print_end_s: list[float] = []
         self._layer_start_s: list[float] = []
         self._layer_end_s: list[float] = []
         self._layer_print_time_s: list[float] = []
@@ -134,6 +135,17 @@ class PrintSimulation:
         self.passes = self._validate_passes(value)
         self._build_path()
 
+    def configure(self, print_speed_mm_s: float, move_speed_mm_s: float,
+                  passes: int):
+        """Validate and recompute the timeline just once for a UI change."""
+        printing = self._validate_speed(print_speed_mm_s)
+        travel = self._validate_speed(move_speed_mm_s)
+        passes = self._validate_passes(passes)
+        self.print_speed_mm_s = printing
+        self.move_speed_mm_s = travel
+        self.passes = passes
+        self._build_path()
+
     @property
     def layer_seconds(self):
         return self._layer_end_s[0]
@@ -144,7 +156,7 @@ class PrintSimulation:
 
     @property
     def total_print_seconds(self):
-        return sum(self._layer_print_time_s)
+        return self._segment_print_end_s[-1]
 
     @property
     def total_movement_seconds(self):
@@ -153,10 +165,12 @@ class PrintSimulation:
     def _build_path(self):
         self.segments = []
         self._segment_end_s = []
+        self._segment_print_end_s = []
         self._layer_start_s = []
         self._layer_end_s = []
         self._layer_print_time_s = []
         elapsed = 0.0
+        elapsed_print = 0.0
         left = self.min_x - self.overscan_mm
         right = self.min_x + self.width + self.overscan_mm
         y_first = self.max_y - self.row_step * 0.5
@@ -164,7 +178,7 @@ class PrintSimulation:
                     float(self.layers[0]["target_stack_height_mm"]) + self.head_clearance_mm)
 
         def add(kind, layer, dest, band, pidx):
-            nonlocal elapsed, last_xyz
+            nonlocal elapsed, elapsed_print, last_xyz
             dist = math.dist(last_xyz, dest)
             speed = self.print_speed_mm_s if kind == "print" else self.move_speed_mm_s
             duration = dist / speed
@@ -175,7 +189,10 @@ class PrintSimulation:
                                     duration, band, pidx, kind == "print")
                 self.segments.append(seg)
                 elapsed += duration
+                if kind == "print":
+                    elapsed_print += duration
                 self._segment_end_s.append(elapsed)
+                self._segment_print_end_s.append(elapsed_print)
             last_xyz = dest
 
         for layer in range(self.count):
@@ -259,7 +276,8 @@ class PrintSimulation:
             motion_kind=segment.kind,
             printing=segment.printing,
             progress_percent=100 * fraction,
-            elapsed_print_s=self.total_print_seconds * fraction,  # summary approximation
+            elapsed_print_s=(self._segment_print_end_s[ix] -
+                (segment.duration_s * (1.0 - alpha) if segment.printing else 0.0)),
             remaining_virtual_s=max(0.0, total-t),
             pass_index=segment.pass_index,
         )
