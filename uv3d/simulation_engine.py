@@ -116,8 +116,10 @@ class PrintSimulation:
             else GantryConfig(
                 heads=[HeadConfig("i3200-U1", "color")], lamps=[]))
         self.gantry_config.validate()
+        self._scan_pitch_override = scan_pitch_mm
         self.scan_pitch_mm = float(
-            scan_pitch_mm if scan_pitch_mm is not None else self.head_spec.swath_mm)
+            scan_pitch_mm if scan_pitch_mm is not None
+            else min(h.swath_mm for h in self.gantry_config.heads if h.enabled))
         self.head_clearance_mm = float(head_clearance_mm)
         self.overscan_mm = float(overscan_mm)
         if (not math.isfinite(self.scan_pitch_mm) or self.scan_pitch_mm <= 0
@@ -229,6 +231,12 @@ class PrintSimulation:
         self._support_head = next(
             (h for h in active_heads if h.material == "support"),
             active_heads[0])
+        # The narrowest enabled head sets a conservative gantry band step.
+        # User-edited physical swath widths therefore change the virtual
+        # number of passes and ETA. Explicit test/special simulation pitch
+        # overrides take precedence.
+        if self._scan_pitch_override is None:
+            self.scan_pitch_mm = min(h.swath_mm for h in active_heads)
         self._min_head_dy = min(h.offset_y_mm for h in active_heads)
         max_dy = max(h.offset_y_mm for h in active_heads)
         # Enlarge the Y sweep if heads are staggered along Y. A head behind
