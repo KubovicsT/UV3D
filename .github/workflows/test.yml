@@ -17,13 +17,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install Linux Qt runtime libraries
+      - name: Install Linux Qt and shader validation libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 libxcb-cursor0
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 libxcb-cursor0 glslang-tools
       - name: Install test dependencies
         run: python -m pip install -r requirements.txt pytest
       - name: Test slicer and GUI startup
         run: python -m pytest -q
+      - name: Validate all OpenGL 3.3 shaders without GPU (Linux)
+        if: runner.os == 'Linux'
+        run: python scripts/validate_shaders.py
       - name: Validate Windows installation and update script syntax
         if: runner.os == 'Windows'
         shell: pwsh
