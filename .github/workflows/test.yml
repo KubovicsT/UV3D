@@ -19,7 +19,7 @@ jobs:
           python-version: '3.12'
       - name: Install Linux Qt and shader validation libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 libxcb-cursor0 glslang-tools
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 libxcb-cursor0 glslang-tools xvfb xauth libgl1-mesa-dri
       - name: Install test dependencies
         run: python -m pip install -r requirements.txt pytest
       - name: Test slicer and GUI startup
@@ -27,6 +27,12 @@ jobs:
       - name: Validate all OpenGL 3.3 shaders without GPU (Linux)
         if: runner.os == 'Linux'
         run: python scripts/validate_shaders.py
+      - name: Exercise real simulation GPU paint and rapid seeks under Mesa (Linux)
+        if: runner.os == 'Linux'
+        env:
+          QT_QPA_PLATFORM: xcb
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: xvfb-run -a -s '-screen 0 1280x800x24' python scripts/smoke_simulation_gl.py
       - name: Validate Windows installation and update script syntax
         if: runner.os == 'Windows'
         shell: pwsh
