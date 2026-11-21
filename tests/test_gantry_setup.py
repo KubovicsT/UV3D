@@ -62,7 +62,7 @@ def test_lamp_sweeps_add_duration_cover_all_xy_and_obey_travel_speed(example_job
                                 move_speed_mm_s=500, passes=2,
                                 gantry_config=config)
     cure = [s for s in with_lamp.segments if s.kind == "cure"]
-    assert len(cure) == 3 * math.ceil(30 / 11) * config.cure_passes
+    assert len(cure) == 3 * with_lamp.passes * math.ceil(30 / 11) * config.cure_passes
     assert with_lamp.total_seconds > without.total_seconds
     assert all(s.curing and not s.printing for s in cure)
     assert all(s.speed_mm_s == 500 for s in cure)
