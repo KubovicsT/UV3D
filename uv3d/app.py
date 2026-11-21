@@ -613,7 +613,11 @@ class MainWindow(QMainWindow):
         self.job_data = json.loads(self.job_path.read_text(encoding="utf-8"))
         n = len(self.job_data["layers"])
         self.show_slice()
-        summary = f"{n:,} solid model layers exported to:\n{self.job_path.parent}"
+        model_z = float(self.job_data["scaled_dimensions_mm"][2])
+        build_z = float(self.job_data["layers"][-1]["target_stack_height_mm"])
+        summary = (
+            f"{n:,} exported layers · model height {model_z:.2f} mm "
+            f"· enclosed build height {build_z:.2f} mm:\n{self.job_path.parent}")
         support = self.job_data.get("support", {})
         if support.get("enabled"):
             stats = support.get("statistics", {})
@@ -622,7 +626,9 @@ class MainWindow(QMainWindow):
                 f" | {stats.get('saving_vs_cube_percent', 0):.1f}% less than rectangular enclosure"
             )
         self.output_label.setText(summary)
-        self.log.appendPlainText(f"Exported {n} OFFLINE layers, scaled height {self.job_data['scaled_dimensions_mm'][2]:.3f} mm.")
+        self.log.appendPlainText(
+            f"Exported {n} OFFLINE layers, model {model_z:.3f} mm; "
+            f"model + support roof {build_z:.3f} mm.")
         self.statusBar().showMessage("Offline layer masks generated successfully")
         for warning in self.job_data["warnings"]:
             self.log.appendPlainText("WARNING: " + warning)
