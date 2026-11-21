@@ -133,6 +133,7 @@ def slice_fast(filename, output_dir, settings: SliceSettings,
         "format": "UV3D_OFFLINE_JOB_V1",
         "safety": "PREVIEW ONLY. Never send raster masks directly to printheads or axes.",
         "source_name": Path(filename).name,
+        "source_path": str(Path(filename).resolve()),  # Local-only offline job metadata.
         "settings": asdict(settings),
         "original_dimensions_mm": original_dimensions.tolist(),
         "scaled_dimensions_mm": mesh.extents.tolist(),
