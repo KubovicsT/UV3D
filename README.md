@@ -1,6 +1,6 @@
 # UV3D
 
-**Prototype v0.1 — offline experimental UV slicing. No printhead, motor, UV lamp, or printer control is implemented.**
+**Prototype v0.2 — offline experimental UV slicing. No printhead, motor, UV lamp, or printer control is implemented.**
 
 UV3D targets the Gongzheng H6090EI (three Epson i3200 heads, CMYK/white/varnish), with FlexiPRINT MiniTX GongZheng Edition and Gongzheng PrintExp. It is independent of both vendor applications.
 
