@@ -30,7 +30,17 @@ Default suggested location: X:\UV3D; choose any other writable folder if preferr
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-UV3D.ps1
 
 4. The script downloads portable Git and official Python, puts both under runtime\, checks out main and installs the Python wheels into runtime\site-packages. No separate Python, Git, or Qt installation is needed.
-5. Launch from Start-UV3D.cmd. Inside the app, click **Update from GitHub main** for future changes.
+5. Launch from Start-UV3D.cmd. Inside the app, click **Update from GitHub main** for future changes. This now opens a visible PowerShell window with step-by-step progress and any errors (the window remains open so you can read it).
+
+### Updating manually
+
+Close UV3D, then double-click `Update-UV3D.cmd` in the application folder. It shows Git fetch progress, dependency checks, the installed commit and any errors. It remains open at the end.
+
+Or use PowerShell directly:
+
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "X:\UV3D\Update-UV3D.ps1"
+
+Run from your actual installation folder if different. Pass `-NoRestart` if you only want to update without relaunching UV3D. Logs are saved to `workspace\logs\update.log` inside the app. Existing `workspace\` and `runtime\` are preserved; updates do not force-reset or create GitHub releases.
 
 The installer does not register system-wide Python or Git, modify the global PATH, or install packages into Program Files or AppData. UV3D uses runtime\tmp and runtime\pip-cache for its managed working files. Jobs and logs go in workspace\. The OS and third-party components may still create their own caches elsewhere; we cannot promise to override Windows itself.
 
@@ -41,7 +51,8 @@ The installer does not register system-wide Python or Git, modify the global PAT
       uv3d\                 Python application
       Install-UV3D.ps1      Portable initial setup / repair
       Start-UV3D.cmd        Launcher
-      Update-UV3D.ps1       Fast-forward updater
+      Update-UV3D.ps1       Fast-forward updater with visible progress
+      Update-UV3D.cmd       Double-click update launcher
       requirements.txt      Local Python dependencies
       runtime\              Portable Git/Python, packages, downloads and cache (git-ignored)
       workspace\            User jobs, logs and working files (git-ignored)
