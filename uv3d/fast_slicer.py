@@ -120,7 +120,9 @@ def slice_fast(filename, output_dir, settings: SliceSettings,
     n = math.ceil(height_mm / settings.layer_mm)
     # Total pixel count affects runtime and disk use, not peak raster RAM:
     # only the active layer is rendered, encoded, then written to disk.
-    plan = calculate_job_plan(w, h, n, support_enabled=settings.support_enabled)
+    cap_layers = (math.ceil(settings.support_top_cap_mm / settings.layer_mm - 1e-9)
+                  if settings.support_enabled and settings.support_top_cap_mm else 0)
+    plan = calculate_job_plan(w, h, n + cap_layers, support_enabled=settings.support_enabled)
     out = Path(output_dir)
     if out.exists() and any(out.iterdir()):
         raise ValueError("Export folder must be empty, to avoid mixing jobs.")
@@ -145,6 +147,7 @@ def slice_fast(filename, output_dir, settings: SliceSettings,
         "effective_raster_margin_mm": raster_margin,
         "solid_volume": True,
         "support": {"enabled": settings.support_enabled, "casing_mm": settings.support_casing_mm,
+                    "top_cap_mm": settings.support_top_cap_mm,
                     "material": "UNASSIGNED - requires separately validated removable support ink"},
         "storage_plan": plan.as_dict(),
         "warnings": warnings + [
@@ -184,7 +187,7 @@ def slice_fast(filename, output_dir, settings: SliceSettings,
     prev_mask = None
     prev_encoded = None
 
-    progress_total = n * (2 if settings.support_enabled else 1)
+    progress_total = n * (2 if settings.support_enabled else 1) + cap_layers
     if on_stage:
         on_stage("Generating solid model volume masks and exterior color boundaries")
     for idx in range(n):
@@ -269,7 +272,7 @@ def slice_fast(filename, output_dir, settings: SliceSettings,
         manifest["support"]["statistics"] = generate_support_masks(
             out, manifest["layers"], settings.body_material,
             settings.support_casing_mm, settings.dpi, settings.layer_mm,
-            on_progress=support_progress)
+            on_progress=support_progress, top_cap_mm=settings.support_top_cap_mm)
     job = out / "job.json"
     job.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return job
