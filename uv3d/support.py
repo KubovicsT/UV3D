@@ -88,7 +88,8 @@ def generate_support_masks(output_dir: str | Path, layer_entries: list[dict],
             "cube_support_volume_mm3": 0.0, "saving_vs_cube_percent": 0.0,
         }
     first_path = out / layer_entries[-1][body_material]
-    first = cv2.imread(str(first_path), cv2.IMREAD_GRAYSCALE)
+    first = cv2.imdecode(np.fromfile(first_path, dtype=np.uint8),
+                          cv2.IMREAD_GRAYSCALE)
     if first is None:
         raise RuntimeError(f"Unable to read solid-model mask: {first_path}")
     height, width = first.shape
@@ -102,15 +103,17 @@ def generate_support_masks(output_dir: str | Path, layer_entries: list[dict],
     for completed, layer in enumerate(reversed(layer_entries), start=1):
         ensure_disk_space(out, width * height)
         src = out / layer[body_material]
-        part = first if completed == 1 else cv2.imread(
-            str(src), cv2.IMREAD_GRAYSCALE)
+        part = first if completed == 1 else cv2.imdecode(
+            np.fromfile(src, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
         if part is None or part.shape != (height, width):
             raise RuntimeError(f"Missing or inconsistent solid-model mask: {src}")
         support, envelope = support_layer(part, envelope, kernel)
         layer["support"] = f"{int(layer['index']):05d}_support.png"
         dest = out / layer["support"]
-        if not cv2.imwrite(str(dest), support, mask_options):
-            raise OSError(f"Failed to write support image: {dest}")
+        success, png = cv2.imencode(".png", support, mask_options)
+        if not success:
+            raise OSError(f"Failed to encode support image: {dest}")
+        dest.write_bytes(png.tobytes())
         support_pixels += cv2.countNonZero(support)
         model_pixels += cv2.countNonZero(part)
         layer["contains_support"] = bool(np.any(support))
