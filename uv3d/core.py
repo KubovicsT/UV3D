@@ -230,6 +230,7 @@ def _slice_model_legacy(filename: str | Path, output_dir: str | Path, settings: 
         "format": "UV3D_OFFLINE_JOB_V1",
         "safety": "PREVIEW ONLY. Never send raster masks directly to printheads or axes.",
         "source_name": Path(filename).name,
+        "source_path": str(Path(filename).resolve()),  # Local-only offline job metadata.
         "settings": asdict(settings),
         "original_dimensions_mm": original_dimensions.tolist(),
         "scaled_dimensions_mm": mesh.extents.tolist(),
