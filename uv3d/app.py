@@ -158,7 +158,27 @@ class MainWindow(QMainWindow):
         form.addRow("Boundary color width (mm)", self.shell)
         self.body = QComboBox()
         self.body.addItems(["white", "varnish"])
-        form.addRow("Body mask", self.body)
+        form.addRow("Solid model fill material", self.body)
+        self.support_enabled = QCheckBox("Generate support down to build plate")
+        self.support_enabled.setChecked(True)
+        self.support_enabled.setToolTip(
+            "Fill unsupported XY columns below every higher model/support pixel.")
+        form.addRow("Conformal support", self.support_enabled)
+        self.support_casing = QDoubleSpinBox()
+        self.support_casing.setDecimals(2)
+        self.support_casing.setRange(0, 5)
+        self.support_casing.setSingleStep(0.2)
+        self.support_casing.setSuffix(" mm")
+        self.support_casing.setValue(0.6)
+        self.support_casing.setKeyboardTracking(False)
+        self.support_casing.setToolTip(
+            "Extra radial material around the model. 0 mm supports only vertical overhang columns.")
+        form.addRow("Support casing thickness", self.support_casing)
+        support_warning = QLabel(
+            "SUPPORT is a separate proposed material channel; white/varnish "
+            "ink is NOT assumed water-soluble. Trapped cavities may be inaccessible.")
+        support_warning.setWordWrap(True)
+        form.addRow(support_warning)
         self.x_pos = QDoubleSpinBox()
         self.x_pos.setRange(0, 600)
         self.x_pos.setValue(10)
@@ -168,6 +188,9 @@ class MainWindow(QMainWindow):
         self.y_pos.setValue(10)
         form.addRow("Raster offset Y (mm)", self.y_pos)
         controls.addWidget(settings)
+        self.support_enabled.toggled.connect(self.invalidate_export)
+        self.support_casing.valueChanged.connect(self.invalidate_export)
+        self.support_enabled.toggled.connect(self.support_casing.setEnabled)
         for ctl in (self.dpi, self.shell, self.body, self.x_pos, self.y_pos):
             if isinstance(ctl, QComboBox):
                 ctl.currentTextChanged.connect(self.invalidate_export)
@@ -278,7 +301,7 @@ class MainWindow(QMainWindow):
         channel_column = QVBoxLayout()
         channel_column.addWidget(QLabel("Exported mask channel"))
         self.channel = QComboBox()
-        self.channel.addItems(["color", "white", "varnish"])
+        self.channel.addItems(["combined", "white", "color", "varnish", "support"])
         self.channel.currentTextChanged.connect(self.show_slice)
         channel_column.addWidget(self.channel)
         channel_column.addWidget(QLabel("Preview only — not a printer-ready RIP job."))
@@ -512,6 +535,8 @@ class MainWindow(QMainWindow):
             layer_mm=self.layer.value(), target_height_mm=self.model_height.value(),
             dpi=self.dpi.value(), shell_mm=self.shell.value(),
             body_material=self.body.currentText(),
+            support_enabled=self.support_enabled.isChecked(),
+            support_casing_mm=self.support_casing.value(),
             placement_x_mm=self.x_pos.value(), placement_y_mm=self.y_pos.value()
         )
         self.progress.setRange(0, 100)
@@ -526,8 +551,9 @@ class MainWindow(QMainWindow):
         self.compatibility_mode.setEnabled(not running)
         self.open_button.setEnabled(not running and self.import_thread is None)
         for control in (self.model_height, self.layer, self.dpi, self.shell,
-                        self.body, self.x_pos, self.y_pos):
+                        self.body, self.x_pos, self.y_pos, self.support_enabled):
             control.setEnabled(not running and self.mesh_path is not None)
+        self.support_casing.setEnabled(not running and self.support_enabled.isChecked())
 
     def on_slicer_progress(self, current, total, seconds):
         total = max(1, total)
@@ -560,7 +586,15 @@ class MainWindow(QMainWindow):
         self.job_data = json.loads(self.job_path.read_text(encoding="utf-8"))
         n = len(self.job_data["layers"])
         self.show_slice()
-        self.output_label.setText(f"{n:,} scaled layers exported to:\n{self.job_path.parent}")
+        summary = f"{n:,} solid model layers exported to:\n{self.job_path.parent}"
+        support = self.job_data.get("support", {})
+        if support.get("enabled"):
+            stats = support.get("statistics", {})
+            summary += (
+                f"\nConformal support: {stats.get('support_volume_mm3', 0) / 1000:.1f} cm³"
+                f" | {stats.get('saving_vs_cube_percent', 0):.1f}% less than rectangular enclosure"
+            )
+        self.output_label.setText(summary)
         self.log.appendPlainText(f"Exported {n} OFFLINE layers, scaled height {self.job_data['scaled_dimensions_mm'][2]:.3f} mm.")
         self.statusBar().showMessage("Offline layer masks generated successfully")
         for warning in self.job_data["warnings"]:
@@ -576,11 +610,38 @@ class MainWindow(QMainWindow):
             return
         idx = min(self.layer_select.value() - 1, len(self.job_data["layers"]) - 1)
         layer = self.job_data["layers"][idx]
-        image = QPixmap(str(self.job_path.parent / layer[self.channel.currentText()]))
-        if image.isNull():
-            self.preview_label.setText("Unable to load preview")
-            return
-        self.preview_label.setPixmap(image.scaled(260, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        channel = self.channel.currentText()
+        root = self.job_path.parent
+        try:
+            if channel in ("combined", "support"):
+                # Colors are UI preview ONLY. The raw support PNG remains an
+                # unmapped, separate grayscale material channel.
+                from PIL import Image
+                from PySide6.QtGui import QImage
+                part_name = self.job_data["settings"]["body_material"]
+                model = Image.open(root / layer[part_name]).convert("L")
+                preview = Image.new("RGBA", model.size, (25, 33, 46, 255))
+                support_file = layer.get("support")
+                if support_file:
+                    support_mask = Image.open(root / support_file).convert("L")
+                    preview.paste((153, 106, 206, 255), (0, 0), support_mask)
+                if channel == "combined":
+                    preview.paste((226, 232, 239, 255), (0, 0), model)
+                    color = Image.open(root / layer["color"]).convert("RGBA")
+                    preview.alpha_composite(color)
+                rgba = preview.tobytes()
+                qim = QImage(rgba, preview.width, preview.height,
+                             preview.width * 4, QImage.Format_RGBA8888).copy()
+                image = QPixmap.fromImage(qim)
+            else:
+                image = QPixmap(str(root / layer[channel]))
+            if image.isNull():
+                raise ValueError("Could not decode mask image")
+            self.preview_label.setPixmap(
+                image.scaled(330, 165, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        except Exception as exc:
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText(f"Preview unavailable: {exc}")
 
     def start_simulation(self):
         if not self.job_data:
