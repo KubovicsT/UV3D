@@ -19,6 +19,7 @@ from shapely.ops import polygonize, unary_union
 @dataclass
 class SliceSettings:
     layer_mm: float = 0.05
+    target_height_mm: float | None = None
     dpi: int = 300
     margin_mm: float = 3.0
     shell_mm: float = 0.3
@@ -27,6 +28,8 @@ class SliceSettings:
     placement_y_mm: float = 10.0
 
     def validate(self) -> None:
+        if self.target_height_mm is not None and not (0.05 <= self.target_height_mm <= 180.0):
+            raise ValueError("Target height must be between 0.05 and 180 mm.")
         if not (0.01 <= self.layer_mm <= 1.0):
             raise ValueError("Layer thickness must be 0.01–1.0 mm (not a printer calibration).")
         if not (72 <= self.dpi <= 1200):
@@ -71,6 +74,27 @@ def load_mesh(filename: str | Path) -> tuple[trimesh.Trimesh, list[str]]:
     if np.any(mesh.extents <= 0):
         raise ValueError("Model has zero size on at least one axis.")
     return mesh, warnings
+
+
+def prepare_mesh(mesh: trimesh.Trimesh, target_height_mm: float | None = None) -> trimesh.Trimesh:
+    """Uniformly resize XY and Z to a requested model height; rest on z=0.
+
+    The input mesh is NEVER changed. The same transform powers 3D preview
+    and offline slice generation, so layer count/geometry cannot disagree.
+    """
+    height = float(mesh.extents[2])
+    if not np.isfinite(height) or height <= 0:
+        raise ValueError("Model has no usable Z height.")
+    if target_height_mm is not None:
+        if not np.isfinite(target_height_mm) or not (0.05 <= target_height_mm <= 180.0):
+            raise ValueError("Target height must be between 0.05 and 180 mm.")
+        factor = float(target_height_mm) / height
+    else:
+        factor = 1.0
+    result = mesh.copy()
+    result.apply_scale(factor)
+    result.apply_translation([0.0, 0.0, -float(result.bounds[0][2])])
+    return result
 
 
 def _face_colors(mesh: trimesh.Trimesh) -> np.ndarray:
@@ -141,6 +165,8 @@ def slice_model(filename: str | Path, output_dir: str | Path, settings: SliceSet
     settings.validate()
     machine = profile or MachineProfile()
     mesh, warnings = load_mesh(filename)
+    original_dimensions = mesh.extents.copy()
+    mesh = prepare_mesh(mesh, settings.target_height_mm)
     minimum, maximum = mesh.bounds
     model_width, model_depth, model_height = mesh.extents
     if model_height > 180:
@@ -172,6 +198,9 @@ def slice_model(filename: str | Path, output_dir: str | Path, settings: SliceSet
         "safety": "PREVIEW ONLY. Never send raster masks directly to printheads or axes.",
         "source_name": Path(filename).name,
         "settings": asdict(settings),
+        "original_dimensions_mm": original_dimensions.tolist(),
+        "scaled_dimensions_mm": mesh.extents.tolist(),
+        "uniform_scale_factor": float(mesh.extents[2] / original_dimensions[2]),
         "machine_profile": asdict(machine),
         "model_bounds_mm": [minimum.tolist(), maximum.tolist()],
         "raster_size_px": [w, h],
