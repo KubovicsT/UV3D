@@ -262,7 +262,7 @@ class SimulationWidget(QWidget):
             "the source vertex/face colors are preserved instead.")
         support_layout.addWidget(self.model_color_button)
         self.future_checkbox = QCheckBox("Show unprinted model silhouette")
-        self.future_checkbox.setChecked(False)
+        self.future_checkbox.setChecked(True)
         self.future_checkbox.toggled.connect(self.show_future_changed)
         support_layout.addWidget(self.future_checkbox)
         sidebar.addWidget(support_group)
