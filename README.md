@@ -1,18 +1,20 @@
 # UV3D
 
-**Prototype v0.2 — offline experimental UV slicing. No printhead, motor, UV lamp, or printer control is implemented.**
+**Prototype v0.3 — offline experimental UV slicing. No printhead, motor, UV lamp, or printer control is implemented.**
 
 UV3D targets the Gongzheng H6090EI (three Epson i3200 heads, CMYK/white/varnish), with FlexiPRINT MiniTX GongZheng Edition and Gongzheng PrintExp. It is independent of both vendor applications.
 
 ## Features
 
 - Windows desktop GUI to import STL, OBJ, GLB, GLTF, 3MF and PLY triangle meshes.
-- **Responsive background imports:** load meshes and simplify preview geometry without blocking the Windows UI. A status message and indeterminate progress bar show which stage is running, and the log records timings. The detailed-mesh preview uses the MIT-licensed `fast-simplification` native library where possible, with a Python fallback; its wheel is installed into the existing UV3D `runtime/` directory, not system-wide.
+- **Responsive background imports:** load meshes and simplify preview geometry without blocking the Windows UI. A status message and indeterminate progress bar show which stage is running, and the log records timings. On Windows with OpenGL, the import worker prepares **all original triangles** for the graphics card rather than creating a reduced mesh. The MIT-licensed `fast-simplification` library is retained only for the software fallback. All libraries, including PyOpenGL and OpenCV, are installed into the existing UV3D `runtime/` directory, not system-wide.
 - Interactive orbitable **3D build viewport**: left-drag orbit, right/middle-drag pan, wheel zoom, Reset view.
 - **Set model height in millimeters**: the mesh is scaled uniformly in X/Y/Z and the exact same transformed geometry is used for both preview and exported slices.
 - Slicer-style **vertical layer slider**, synchronized numeric layer selector, translucent full-model silhouette, visible solid portion below the slice and amber highlighted cross-section **before export**.
-- The 3D view uses Qt software painting (no extra 3D graphics libraries or separate drivers). To stay responsive, it builds a bounded triangle-count preview using vertex clustering in a background thread, while the cross-section and exported masks use the complete geometry. Cross-section calculations also run in the background and debounce rapid slider movements.
-- Generate same-size white, varnish and approximate colored boundary PNG masks for each horizontal slice, plus a JSON job manifest.
+- **Windows 3D viewport: full original mesh resolution.** The OpenGL 3.3 viewer uploads the original mesh triangles and uses the graphics card for orbit, pan, zoom and live layer clipping, with **no simplification**. Slice boundaries are calculated off the main thread.
+- Headless test machines and unsupported display environments retain the lower-detail software renderer as a fallback. GPU viewer requires functioning OpenGL 3.3 drivers and enough available graphics memory; Windows graphics driver support must be verified on the actual machine.
+- Exported slices always use the complete original mesh geometry, regardless of viewer.
+- **Faster layer generation:** Z-range face filtering, loop stitching, OpenCV filling/PNG encoding, and reuse of unchanged/blank layer masks. Still produces same-size white, varnish and approximate colored boundary PNGs for every layer, plus a JSON job manifest.
 - Support hollow regions, warn about open geometry and reject oversized jobs.
 - Preview exported 2D masks by channel, inspect layers inside the 3D view and simulate job progress with **no printer commands**.
 - Read-only machine profile: 600 x 900 mm nominal bed, 3 heads, 4,841.455 Z motor pulses/mm (observed factory configuration).
@@ -71,7 +73,7 @@ The production app doesn't rely on system Python. MIT licensed: see LICENSE.
 ## Known limitations
 
 - Non-manifold/open meshes may produce incomplete polygons.
-- The viewport is an approximate software-rendered 3D preview; complex meshes can render more slowly, and displayed exterior faces are sampled for performance. Exported slices are calculated from full-resolution geometry.
+- GPU display is un-decimated, but requires OpenGL 3.3 and enough video memory for the original mesh. Very large or per-face-colored meshes can use substantial video memory. Headless/software fallback previews remain simplified.
 - Height resizing is **uniform** rather than Z-only stretching; X and Y dimensions change proportionally. Changing model height now reuses the original preview mesh instead of reprocessing the entire file. Existing job previews are invalidated when height or slice settings change.
 - Textured mesh colors are not reproduced accurately. Surface colors are only approximated along visible layer boundaries.
 - White/varnish masks need verified mapping to real RIP spot channels.
@@ -80,7 +82,7 @@ The production app doesn't rely on system Python. MIT licensed: see LICENSE.
 
 ## Diagnosing slow imports
 
-Open a model, then check the import messages in the slicer log. It records **geometry load seconds** and **preview preparation seconds** separately so you can see which stage needs additional optimization. Large files may still take time to process, but the interface should remain responsive. Only one import/export task runs at a time; the program intentionally prevents shutdown while the worker is active.
+Open a model, then check the import messages in the slicer log. It records **geometry load seconds** and **preview preparation seconds** separately so you can see which stage needs additional optimization. Large files may still take time to read or upload to GPU memory, but the import worker keeps most of the processing off the UI thread. Only one import/export task runs at a time; the program intentionally prevents shutdown while the worker is active.
 
 ## Next milestones
 
