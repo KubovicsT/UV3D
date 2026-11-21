@@ -589,7 +589,10 @@ class SimulationWidget(QWidget):
             f"({self.print_mode.currentText().split(' — ')[0]}). "
             f"Carriage: {sum(h.enabled for h in self._gantry_config.heads)} heads, "
             f"{sum(l.enabled for l in self._gantry_config.lamps)} UV lamps. "
-            f"{'Curing immediately after this pass' if frame.curing else 'Deposition/travel'}; "
+            f"{'PRINTING + trailing UV lamp' if frame.printing and frame.curing
+               else 'UV follow-through / curing' if frame.curing
+               else 'Printing (UV off)' if frame.printing
+               else 'Gantry repositioning (UV off)'}; "
             "UV footprint and time are simulation estimates, not calibrated.")
         if update_viewport and self.viewport is not None and self._scene_ready:
             self.viewport.set_frame(frame)
