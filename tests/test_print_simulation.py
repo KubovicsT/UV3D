@@ -245,3 +245,62 @@ def test_simulation_opengl_error_is_caught_at_qt_paint_boundary():
     assert "GL_INVALID_OPERATION" in details[0]
     assert not viewport._gpu_ready
     viewport.close()
+
+
+
+def test_every_layer_has_a_continuous_return_path_and_no_teleports(tmp_path):
+    from uv3d.simulation_engine import PrintHeadSpec
+    _, manifest = make_job(tmp_path / "head_job", layers=5)
+    plan = PrintSimulation(manifest, move_speed_mm_s=600,
+                           print_speed_mm_s=300, passes=6,
+                           overscan_mm=10)
+    head = PrintHeadSpec()
+    assert (head.body_x_mm, head.body_y_mm, head.body_z_mm) == (69.1, 59.5, 35.6)
+    assert head.swath_mm == pytest.approx(33.8)
+    assert plan.rows == 1
+    assert sum(s.kind == "return" for s in plan.segments) == 5
+    assert sum(s.kind == "z_move" for s in plan.segments) == 4
+    for a, b in zip(plan.segments, plan.segments[1:]):
+        # At a boundary the carriage MUST occupy exactly the same location,
+        # including when Z rises and a fresh layer begins.
+        assert a.end_xyz == pytest.approx(b.start_xyz)
+    assert all(s.speed_mm_s == 300 for s in plan.segments if s.printing)
+    assert all(s.speed_mm_s == 600 for s in plan.segments if not s.printing)
+    for s in plan.segments:
+        if s.kind == "return":
+            assert s.duration_s == pytest.approx(
+                np.linalg.norm(np.array(s.end_xyz) - np.array(s.start_xyz)) / 600)
+    # Temporal seek must interpolate a return rather than teleport to start.
+    ret_i = next(i for i, s in enumerate(plan.segments) if s.kind == "return")
+    ret = plan.segments[ret_i]
+    begin = plan._segment_end_s[ret_i] - ret.duration_s
+    frame = plan.get_frame((begin + ret.duration_s / 2) / plan.total_seconds)
+    assert frame.motion_kind == "return"
+    middle = tuple((a+b)/2 for a,b in zip(ret.start_xyz,ret.end_xyz))
+    assert frame.head_position_mm == pytest.approx(middle)
+
+
+def test_print_speed_only_changes_printing_time_and_not_movement_time(tmp_path):
+    _, manifest = make_job(tmp_path / "travel_job", layers=3)
+    plan = PrintSimulation(manifest, move_speed_mm_s=300,
+                           print_speed_mm_s=100, passes=2)
+    initial_print = plan.total_print_seconds
+    initial_nonprint = plan.total_movement_seconds
+    plan.set_print_speed(200)
+    assert plan.total_print_seconds == pytest.approx(initial_print / 2)
+    assert plan.total_movement_seconds == pytest.approx(initial_nonprint)
+    plan.set_move_speed(600)
+    assert plan.total_print_seconds == pytest.approx(initial_print / 2)
+    assert plan.total_movement_seconds == pytest.approx(initial_nonprint / 2)
+    frame = plan.get_frame(.735)
+    assert frame.progress_percent == pytest.approx(73.5)
+    assert frame.remaining_virtual_s == pytest.approx(.265 * plan.total_seconds)
+
+
+def test_i3200_visual_geometry_uses_full_actual_body_dimensions():
+    head = make_head_cuboid(3, 2, 5, 1, 1)
+    xyz = head["position"]
+    spans = xyz.max(axis=0) - xyz.min(axis=0)
+    assert spans[0] == pytest.approx(69.1, abs=.0001)
+    assert spans[1] == pytest.approx(59.5, abs=.0001)
+    assert spans[2] == pytest.approx(35.6, abs=.0001)
