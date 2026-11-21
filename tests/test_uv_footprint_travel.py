@@ -63,7 +63,9 @@ def test_oversized_aligned_uv_lamp_fully_sweeps_every_printed_pixel(
                 assert {s.start_xyz[0],s.end_xyz[0]} == {-50, 70}
                 frame=midpoint(plan,i)
                 assert frame.curing and not frame.printing
-                assert frame.head_position_mm == pytest.approx(s.start_xyz)
+                assert frame.head_position_mm == pytest.approx(
+                    tuple((a+b)/2 for a,b in
+                          zip(s.start_xyz, s.end_xyz)))
                 assert frame.passes_completed == s.pass_index+1
                 footprints=uv_footprints(frame,config,0,0,20,30)
                 assert footprints
