@@ -17,7 +17,8 @@ from PySide6.QtGui import QSurfaceFormat
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL import GL
 from OpenGL.GL import shaders
-from .navigation import orbit as supp_orbit, zoom as supp_zoom, preset as camera_preset
+from .navigation import (orbit as supp_orbit, zoom as supp_zoom,
+                         preset as camera_preset, pan_focal_delta)
 
 VERTEX_DTYPE = np.dtype([("position", "<f4", (3,)), ("color", "u1", (4,))])
 
@@ -151,6 +152,7 @@ class GpuModelViewport(QOpenGLWidget):
         self.yaw, self.pitch = camera_preset("Isometric")
         self.zoom = 1.0
         self.pan = np.zeros(2, dtype=float)
+        self.pan_world = np.zeros(3, dtype=float)
         self._last = self._drag = None
         self.slice_mode = False
         self.slice_z = 0.0
@@ -203,6 +205,7 @@ class GpuModelViewport(QOpenGLWidget):
         self.yaw, self.pitch = camera_preset("Isometric")
         self.zoom = 1.0
         self.pan[:] = 0
+        self.pan_world[:] = 0
         self.update()
 
     def set_view_preset(self, name):
@@ -211,6 +214,7 @@ class GpuModelViewport(QOpenGLWidget):
             return
         self.yaw, self.pitch = camera_preset(name)
         self.pan[:] = 0
+        self.pan_world[:] = 0
         self.update()
 
     def set_slice_mode(self, active):
@@ -289,7 +293,11 @@ class GpuModelViewport(QOpenGLWidget):
         if self._drag == Qt.RightButton:
             self.yaw, self.pitch = supp_orbit(self.yaw, self.pitch, delta.x(), delta.y())
         elif self._drag == Qt.MiddleButton:
-            self.pan += np.array([delta.x(), delta.y()])
+            dims = self.mesh.extents if self.mesh is not None else [10., 10., 10.]
+            magnitude = max(float(max(dims[:2])), float(dims[2]) * 1.45, .0001)
+            pixels = .63 * min(self.width(), self.height()) / magnitude * self.zoom
+            self.pan_world += np.asarray(pan_focal_delta(
+                self.yaw, self.pitch, delta.x(), delta.y(), pixels))
         else:
             return  # Left mouse remains available for selection and future gizmos.
         self.update()
@@ -348,6 +356,7 @@ class GpuModelViewport(QOpenGLWidget):
         dims, bounds = self.mesh.extents, self.mesh.bounds
         center = (bounds[0] + bounds[1]) * .5
         center[2] = float(dims[2]) * .48
+        center += self.pan_world
         magnitude = max(float(max(dims[:2])), float(dims[2]) * 1.45, .0001)
         ratio = self.devicePixelRatioF()
         self._set1f("uScale", self._scale)
