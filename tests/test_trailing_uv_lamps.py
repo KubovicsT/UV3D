@@ -123,3 +123,45 @@ def test_lamp_with_wrong_y_coverage_uses_postpass_cure_not_premature_light():
     assert cures
     assert {s.lamp_index for s in cures}=={0,1}
     assert all(s.kind!="uv_followthrough" for s in plan.segments)
+
+
+
+def test_default_three_head_two_lamp_gantry_uses_only_trailing_side():
+    from uv3d.gantry import default_gantry
+    config = default_gantry()
+    plan = PrintSimulation(job(), passes=2, gantry_config=config)
+    scans = [(i,s) for i,s in enumerate(plan.segments)
+             if s.kind=="print" and s.layer_index==0]
+    assert len(scans)==2
+    assert [s.lamp_index for _,s in scans]==[0,1]
+    assert all(s.curing for _,s in scans)
+    for i,s in scans:
+        frame=midpoint(plan,i)
+        assert frame.active_lamp_index==s.lamp_index
+        assert frame.lamp_active
+        # With these illustrative default offsets, illumination may still
+        # be outside the print at mid-scan. The selected lamp must never be
+        # the leading-side lamp (even before overlap begins).
+        assert frame.printing
+    assert all(a.end_xyz==pytest.approx(b.start_xyz)
+               for a,b in zip(plan.segments,plan.segments[1:]))
+
+
+def test_lamps_physically_larger_than_printhead_use_short_followthrough_not_full_cure_sweep():
+    config = GantryConfig(
+        heads=[HeadConfig("white","white")],
+        lamps=[LampConfig("large left",-80,0,120,90),
+               LampConfig("large right",80,0,120,90)])
+    plan = PrintSimulation(job(), passes=2, gantry_config=config)
+    scans=[(i,s) for i,s in enumerate(plan.segments)
+           if s.kind=="print" and s.layer_index==0]
+    assert [s.lamp_index for i,s in scans]==[0,1]
+    assert all(s.curing for _,s in scans)
+    assert not any(s.kind=="cure" for s in plan.segments)
+    follow=[s for s in plan.segments if s.kind=="uv_followthrough"]
+    assert len(follow)==plan.count*2
+    # The light is 120 mm wide, larger than the 69.1-mm head body.
+    # Each print endpoint is only 10 mm short of fully curing a 20-mm
+    # raster, NOT a full 20-mm UV scan or a carriage jump to the side.
+    assert all(abs(s.end_xyz[0]-s.start_xyz[0])==pytest.approx(10)
+               for s in follow)
