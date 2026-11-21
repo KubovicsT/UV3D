@@ -77,7 +77,9 @@ def main():
             raise RuntimeError("OpenGL playback error:\n" + "\n".join(errors))
     viewport.close()
     app.processEvents()
-    assert any(seg.kind == "cure" for seg in plan.segments)
+    # A trailing UV lamp may cure simultaneously with printing, with no
+    # dedicated curing sweep. Verify UV illumination rather than a phase name.
+    assert any(seg.curing for seg in plan.segments)
     print("Real OpenGL multihead/UV-lamp rendering and 180 non-sequential seeks: PASS")
 
 
