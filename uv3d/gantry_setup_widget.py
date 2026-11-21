@@ -90,14 +90,15 @@ class GantrySetupWidget(QWidget):
         self.cure_passes = QSpinBox()
         self.cure_passes.setRange(1, 5)
         self.cure_passes.valueChanged.connect(self._commit)
-        cure_layout.addRow("UV coverage sweeps per enabled lamp", self.cure_passes)
+        cure_layout.addRow("UV sweeps per lamp after EACH print pass", self.cure_passes)
         explanation = QLabel(
-            "UV lamps illuminate a rectangle matching their configured size. "
-            "After ink deposition, the gantry moves each enabled lamp across "
-            "every part of the layer, with enough Y bands to cover its depth. "
-            "The added curing travel uses non-printing movement speed and "
-            "increases estimated job time. Real UV dose, acceleration and "
-            "simultaneous-lamp optimization have not been calibrated.")
+            "UV exposure is interleaved with printing: print pass 1, cure "
+            "the just-printed band, print pass 2, cure that band again, etc. "
+            "Each enabled lamp moves across the printed strip after EVERY "
+            "print pass, with extra tracks only if its footprint is narrower "
+            "than that strip. UV-only moves use Movement speed and count "
+            "toward the estimated time. These are illustrative motion and "
+            "light-footprint calculations, not calibrated UV dose or printer commands.")
         explanation.setWordWrap(True)
         cure_layout.addRow(explanation)
         layout.addWidget(cure_box)
