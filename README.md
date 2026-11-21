@@ -18,7 +18,9 @@ UV3D targets the Gongzheng H6090EI (three Epson i3200 heads, CMYK/white/varnish)
 - **Crash-resistant layer generation:** masks are generated in a **separate Python process**, so a native OpenCV/geometry failure can terminate the worker without closing UV3D. The main window shows progress, a Cancel button and an error dialog with a log path. Every job gets a diagnostic log under `workspace/logs`; incomplete output remains separated under `workspace/jobs`.
 - **Compatibility slicing:** optional checkbox switches to the older, slower PIL/GEOS workflow if a particular model fails in the accelerated worker.
 - **Faster layer generation:** Z-range face filtering, loop stitching, OpenCV filling/PNG encoding, and reuse of unchanged/blank layer masks. Still produces same-size white, varnish and approximate colored boundary PNGs for every layer, plus a JSON job manifest.
-- Support hollow regions, warn about open geometry and reject oversized jobs.
+- Support hollow regions and warn about open geometry.
+- **Large jobs are supported without a fixed total-layer-pixel cap.** The slicer streams one raster layer at a time and saves it before moving to the next, rather than holding all layers in memory. A 60.021 mm tall, 0.05 mm, 300 DPI model can therefore generate 1,201 layers without the former 350-million-layer-pixel rejection.
+- Storage safety: before starting and before every layer, UV3D checks that its output volume has enough free space for one uncompressed layer plus a 512 MiB safety reserve. If space runs low it stops with a clear error and preserves the partial job. The slicer log shows layer dimensions, expected PNG count and uncompressed pixel-data equivalent; actual PNG file sizes vary with compression.
 - Preview exported 2D masks by channel, inspect layers inside the 3D view and simulate job progress with **no printer commands**.
 - Read-only machine profile: 600 x 900 mm nominal bed, 3 heads, 4,841.455 Z motor pulses/mm (observed factory configuration).
 - **Update** button: portable Git fetches origin/main, fast-forwards only, refreshes folder-local dependencies if necessary, then restarts. No UV3D releases.
@@ -86,6 +88,14 @@ The production app doesn't rely on system Python. MIT licensed: see LICENSE.
 ## Diagnosing slow imports
 
 Open a model, then check the import messages in the slicer log. It records **geometry load seconds** and **preview preparation seconds** separately so you can see which stage needs additional optimization. Large files may still take time to read or upload to GPU memory, but the import worker keeps most of the processing off the UI thread. Only one import/export task runs at a time; the program intentionally prevents shutdown while the worker is active.
+
+## Large-job slicing and disk space
+
+Layer-pixels = raster width × raster height × number of slices. This estimates how much *work* a job contains; it is not the amount of RAM the slicer needs. Previously UV3D refused jobs exceeding 350 million layer-pixels, despite generating one slice at a time. That arbitrary rejection has been removed in both slicing modes.
+
+**Example:** a 44.52 × 44.87 × 60.021 mm model at 300 DPI, 3 mm raster margins and 0.05 mm layers produces about 597 × 601 pixels × 1,201 layers: approximately 431 million layer-pixels and 3,603 mask PNGs. UV3D now accepts that job (subject to output drive capacity, source geometry, and the still-enforced 16-million-pixels-per-layer memory guard).
+
+UV3D checks the available space on the drive containing `workspace/jobs` at the start and again before each layer. It reserves at least 512 MiB plus one layer's uncompressed buffers for safety. Large exports may take significant time and generate thousands of files. The program reports how many PNGs it expects and estimates the raw equivalent of all channels, **not** the final compressed disk usage.
 
 ## Layer-generator crashes and logs
 
