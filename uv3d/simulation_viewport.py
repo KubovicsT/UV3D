@@ -146,6 +146,18 @@ class SimulationViewport(GpuModelViewport):
     def set_simulation_scene(self, source_mesh, gpu_geometry, manifest: dict):
         target_height = float(manifest["scaled_dimensions_mm"][2])
         self.set_scene(source_mesh, gpu_geometry, target_height, reset_camera=True)
+        # The real-sized 69.1×59.5×35.6 mm head can be MUCH larger than a
+        # tiny imported model. Fit both the model and the head into the
+        # initial camera framing, without changing their physical dimensions.
+        from .simulation_engine import PrintHeadSpec
+        spec = PrintHeadSpec()
+        dims = self.mesh.extents
+        magnitude = max(float(max(dims[:2])), float(dims[2]) * 1.45, .0001)
+        span_with_head = max(
+            float(dims[0]) + spec.body_x_mm,
+            float(dims[1]) + spec.body_y_mm,
+            float(dims[2]) + spec.body_z_mm)
+        self.zoom = min(1.0, magnitude / max(magnitude, span_with_head) * 0.92)
         self._raster = manifest
         self.slice_mode = True  # Important: do NOT trigger expensive CPU plane intersections.
         self._cap_timer.stop()
