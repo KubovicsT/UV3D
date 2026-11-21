@@ -202,7 +202,7 @@ class ModelViewport(QWidget):
                 a, b = self._project(endpoints)
                 painter.drawLine(QPointF(*a[:2]), QPointF(*b[:2]))
 
-    def _paint_faces(self, painter, cutoff=None, ghost=False):
+    def _paint_faces(self, painter, projected, cutoff=None, ghost=False):
         if self.triangles is None:
             return
         tri = self.triangles
@@ -214,8 +214,7 @@ class ModelViewport(QWidget):
         if not np.any(visible):
             visible = np.ones(len(tri), dtype=bool)
         indices = np.flatnonzero(visible)
-        centers = tri[indices].mean(axis=1)
-        depth = self._project(centers)[:, 2]
+        depth = projected[indices, :, 2].mean(axis=1)
         painter.setPen(Qt.NoPen)
         for idx in indices[np.argsort(depth)]:
             face = tri[idx]
@@ -226,7 +225,7 @@ class ModelViewport(QWidget):
                     face = clip_triangle_below(face, cutoff)
                     if len(face) < 3:
                         continue
-            pts = self._project(face)
+            pts = projected[idx] if len(face) == 3 and (cutoff is None or tri[idx, :, 2].max() <= cutoff) else self._project(face)
             if ghost:
                 fill = QColor(136, 162, 187, 39)
             else:
@@ -276,13 +275,14 @@ class ModelViewport(QWidget):
             painter.end()
             return
         self._draw_grid(painter)
+        projected = self._project(self.triangles.reshape(-1, 3)).reshape(-1, 3, 3)
         if self.slice_mode:
-            self._paint_faces(painter, ghost=True)
+            self._paint_faces(painter, projected, ghost=True)
             self._draw_cut_plane(painter)
-            self._paint_faces(painter, cutoff=self.slice_z)
+            self._paint_faces(painter, projected, cutoff=self.slice_z)
             self._draw_slice_cap(painter)
         else:
-            self._paint_faces(painter)
+            self._paint_faces(painter, projected)
         painter.setPen(QColor("#bed3e5"))
         painter.setFont(QFont("Segoe UI", 10))
         painter.drawText(QRectF(14, 12, self.width() - 26, 30),
