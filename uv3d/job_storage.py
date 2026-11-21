@@ -29,12 +29,13 @@ class JobStoragePlan:
         return asdict(self)
 
 
-def calculate_job_plan(width_px: int, height_px: int, layers: int) -> JobStoragePlan:
+def calculate_job_plan(width_px: int, height_px: int, layers: int,
+                       support_enabled: bool = False) -> JobStoragePlan:
     """Calculate descriptive totals without allocating any raster images.
 
-    Two grayscale masks (white/varnish) and one 4-channel RGBA color PNG
-    have six bytes per pixel *before* PNG compression. This is an uncompressed
-    pixel-data equivalent, NOT a predicted on-disk file size.
+    Two grayscale model masks (white/varnish), four-channel color RGBA, plus
+    an optional additional grayscale support mask. Six or seven uncompressed
+    bytes per pixel in total before PNG compression.
     """
     values = (width_px, height_px, layers)
     if any(not isinstance(v, int) or v <= 0 for v in values):
@@ -44,10 +45,10 @@ def calculate_job_plan(width_px: int, height_px: int, layers: int) -> JobStorage
         width_px=width_px,
         height_px=height_px,
         layers=layers,
-        png_files=layers * 3,
+        png_files=layers * (4 if support_enabled else 3),
         pixels_per_layer=pixels,
         total_layer_pixels=pixels * layers,
-        raw_channels_bytes=pixels * layers * 6,
+        raw_channels_bytes=pixels * layers * (7 if support_enabled else 6),
     )
 
 
