@@ -122,7 +122,7 @@ CI now tests **1,000 timeline movements across 200 layers**, exact boundary seek
 
 ## Print queue — interactive 3D simulation
 
-After generating masks, open the **Print queue — simulation** tab. UV3D loads the new `job.json` automatically. You can also click **Open existing job.json** to revisit a completed job under `workspace/jobs`. The original mesh is loaded from the locally saved job source path (or original task record); keep that source file available. Print simulation never contacts the machine.
+After generating masks, open the **Print queue — simulation** tab and click **Open 3D simulation**. The 3D player opens in a **separate, crash-isolated window** rather than inside UV3D's main process. All timeline, movement/replay speed, model color and support-opacity controls are in that window. The completed `job.json` is selected automatically after slicing; inside the separate player, use **Open existing job.json** to revisit older jobs under `workspace/jobs`. Keep the original source mesh path (stored in the job or associated task request) available. Neither process sends commands to the printer.
 
 The 3D viewport shows a simplified cuboid representing the printhead, traveling along an **illustrative serpentine path** above the model. The simulation reveals full-resolution model surface geometry below completed layer height and paints the current layer progressively from the actual exported mask files. The model preserves source face/vertex colors when available; STL generally has no embedded display color, so use **Uncolored model tint**. Full UV-mapped textures are still not accurately reproduced.
 
@@ -135,6 +135,21 @@ A filled 3D sacrificial-support surface is generated from a **sampled/downscaled
 - **Show unprinted model silhouette**: toggles a faint ghost for reference before a layer is deposited
 
 This is a conceptual layer-by-layer animation, **not** a Hoson/PrintExp toolpath, a verified Epson printhead scan pattern, a genuine print-time estimate or machine control. Simulated layer-change delay, scan pitch and head clearance are display assumptions. Do not use simulated dimensions or movement as a safety setting.
+
+### Simulation crash isolation and diagnostics
+
+The 3D player runs with UV3D's **existing folder-local Python** (`runtime/python/python.exe` on Windows), in a separate operating-system process. The main app remains open even if native OpenGL, Qt or a display-driver fault terminates the player. The main simulation tab reports the exact exit code, including hexadecimal Windows codes such as `0xC0000005` for an access violation. Click **Open 3D simulation** to restart it without re-exporting masks.
+
+If the simulation repeatedly closes, enable **Troubleshooting mode: disable GPU rendering** in the main simulation tab and reopen it. The standalone player then keeps its timeline and controls but intentionally omits the 3D OpenGL viewport. If it works without GPU mode, the problem is likely specific to 3D rendering or GPU drivers rather than mask data or timeline math.
+
+Relevant files remain inside the UV3D folder:
+- `workspace/logs/uv3d-simulation-child.log`: child process stdout/stderr and exit diagnostics from UV3D's parent
+- `workspace/logs/uv3d-simulation-native.log`: child process start, Python exceptions and best-effort fatal native tracebacks
+- `workspace/logs/uv3d-simulation.log`: recoverable 3D OpenGL error details, when Python catches them
+
+Fatal hardware-level/driver failures sometimes bypass all Python hooks. The separate-process exit code and last successful progress event still help narrow the failure. The viewer is external rather than embedded because an embedded OpenGL widget cannot be made truly crash-isolated. No downloads, system-wide changes or extra runtime dependencies are required.
+
+
 
 ## Large-job slicing and disk space
 
