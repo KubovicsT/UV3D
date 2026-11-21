@@ -459,10 +459,15 @@ class GpuModelViewport(QOpenGLWidget):
             self._line_dirty = False
         GL.glBindVertexArray(self._line_vao)
         GL.glUniform1i(GL.glGetUniformLocation(self._program, "uMode"), 3)
+        # OpenGL 3.3 core-profile drivers (notably on Windows) may advertise
+        # only one-pixel line rasterization. glLineWidth(2.0) then triggers
+        # GL_INVALID_VALUE (1281), crashing Qt's paintGL callback.
+        # Use the universally supported default line width instead.
         GL.glDisable(GL.GL_DEPTH_TEST)
-        GL.glLineWidth(2.0)
-        GL.glDrawArrays(GL.GL_LINES, 0, self._line_count)
-        GL.glEnable(GL.GL_DEPTH_TEST)
+        try:
+            GL.glDrawArrays(GL.GL_LINES, 0, self._line_count)
+        finally:
+            GL.glEnable(GL.GL_DEPTH_TEST)
 
     def paintGL(self):
         ratio = self.devicePixelRatioF()
