@@ -69,7 +69,8 @@ def support_layer(part: np.ndarray, envelope_above: np.ndarray, kernel=None):
 
 def generate_support_masks(output_dir: str | Path, layer_entries: list[dict],
                            body_material: str, casing_mm: float, dpi: int,
-                           layer_mm: float, on_progress=None) -> dict:
+                           layer_mm: float, on_progress=None,
+                           top_cap_mm: float = 0.0) -> dict:
     """Emit numbered 8-bit support PNGs using O(one-layer) raster memory.
 
     Reads the solid-model channel saved by the slicer and writes support PNGs in
@@ -78,7 +79,7 @@ def generate_support_masks(output_dir: str | Path, layer_entries: list[dict],
     """
     if body_material not in ("white", "varnish"):
         raise ValueError("Unsupported solid-model source material.")
-    if casing_mm < 0 or dpi <= 0 or layer_mm <= 0:
+    if casing_mm < 0 or top_cap_mm < 0 or dpi <= 0 or layer_mm <= 0:
         raise ValueError("Invalid support construction parameters.")
     out = Path(output_dir)
     if not layer_entries:
@@ -98,7 +99,9 @@ def generate_support_masks(output_dir: str | Path, layer_entries: list[dict],
     mask_options = [cv2.IMWRITE_PNG_COMPRESSION, 1]
     support_pixels = 0
     model_pixels = 0
-    total = len(layer_entries)
+    original_layers = len(layer_entries)
+    cap_layers = int(np.ceil(top_cap_mm / layer_mm - 1e-9)) if top_cap_mm else 0
+    total = original_layers + cap_layers
 
     for completed, layer in enumerate(reversed(layer_entries), start=1):
         ensure_disk_space(out, width * height)
@@ -120,6 +123,44 @@ def generate_support_masks(output_dir: str | Path, layer_entries: list[dict],
         if on_progress:
             on_progress(completed, total)
 
+    # A conventional sacrificial encasement needs a roof over the model too,
+    # not only columns under overhangs. The roof uses the XY projection of
+    # the entire model/support envelope, so even lower/side protrusions are
+    # covered above the model. The cap is purely support material.
+    if cap_layers:
+        top_z = float(layer_entries[-1]["target_stack_height_mm"])
+        blank_gray = cv2.imencode(".png", np.zeros_like(envelope), mask_options)[1].tobytes()
+        blank_color = cv2.imencode(".png", np.zeros(
+            (height, width, 4), dtype=np.uint8), mask_options)[1].tobytes()
+        roof_bytes = cv2.imencode(".png", envelope, mask_options)[1].tobytes()
+        roof_pixels = cv2.countNonZero(envelope)
+        for number in range(1, cap_layers + 1):
+            ensure_disk_space(out, width * height)
+            index = original_layers + number
+            name = f"{index:05d}"
+            white = f"{name}_white.png"
+            varnish = f"{name}_varnish.png"
+            color = f"{name}_color.png"
+            support_name = f"{name}_support.png"
+            (out / white).write_bytes(blank_gray)
+            (out / varnish).write_bytes(blank_gray)
+            (out / color).write_bytes(blank_color)
+            (out / support_name).write_bytes(roof_bytes)
+            layer_entries.append({
+                "index": index,
+                "slice_center_z_mm": round(top_z + min((number - .5) * layer_mm,
+                                                       top_cap_mm), 6),
+                "target_stack_height_mm": round(top_z + min(number * layer_mm, top_cap_mm), 6),
+                "white": white, "varnish": varnish, "color": color,
+                "support": support_name,
+                "contains_geometry": False,
+                "contains_support": True,
+                "support_only_top_cap": True,
+            })
+            support_pixels += roof_pixels
+            if on_progress:
+                on_progress(original_layers + number, total)
+
     # The bottom envelope is the XY footprint of *all* future occupied columns.
     # A traditional fully filled rectangular support block would occupy the
     # rectangular bounding box of this footprint, at every build height.
@@ -131,6 +172,8 @@ def generate_support_masks(output_dir: str | Path, layer_entries: list[dict],
     saving = (100 * (1 - support_pixels / cube_support_px)
               if cube_support_px > 0 else 0.0)
     return {
+        "top_cap_layers": cap_layers,
+        "top_cap_mm": round(float(top_cap_mm), 4),
         "support_pixels": int(support_pixels),
         "solid_model_pixels": int(model_pixels),
         "support_volume_mm3": round(support_pixels * voxel_volume, 3),
