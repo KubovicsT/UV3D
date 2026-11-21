@@ -390,6 +390,9 @@ class MainWindow(QMainWindow):
         job_name = self.mesh_path.stem[:50] + "_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         out = WORKSPACE / "jobs" / job_name
         self.export_button.setEnabled(False)
+        for control in (self.model_height, self.layer, self.dpi, self.shell, self.body,
+                        self.x_pos, self.y_pos):
+            control.setEnabled(False)
         self.progress.setValue(0)
         self.log.appendPlainText(f"Generating scaled offline export: {out}")
         thread = QThread(self)
@@ -411,6 +414,9 @@ class MainWindow(QMainWindow):
     def thread_finished(self):
         self.worker_thread = None
         self.worker = None
+        for control in (self.model_height, self.layer, self.dpi, self.shell, self.body,
+                        self.x_pos, self.y_pos):
+            control.setEnabled(self.mesh_path is not None)
         self.export_button.setEnabled(self.mesh_path is not None)
 
     def export_finished(self, job_path: str):
