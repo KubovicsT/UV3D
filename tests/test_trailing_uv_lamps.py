@@ -165,3 +165,17 @@ def test_lamps_physically_larger_than_printhead_use_short_followthrough_not_full
     # raster, NOT a full 20-mm UV scan or a carriage jump to the side.
     assert all(abs(s.end_xyz[0]-s.start_xyz[0])==pytest.approx(10)
                for s in follow)
+
+
+
+def test_lamp_center_behind_but_light_edge_ahead_does_not_cure_midprint():
+    """Only the entire UV footprint BEHIND the nozzles may turn on."""
+    cfg=GantryConfig(
+        heads=[HeadConfig("white","white")],
+        lamps=[LampConfig("overlapping left lamp",-10,0,40,55),
+               LampConfig("overlapping right lamp",10,0,40,55)])
+    plan=PrintSimulation(job(),passes=2,gantry_config=cfg)
+    printing=[s for s in plan.segments if s.kind=="print"]
+    assert all(not s.curing for s in printing)
+    assert all(s.lamp_index==-1 for s in printing)
+    assert any(s.kind=="cure" for s in plan.segments)
