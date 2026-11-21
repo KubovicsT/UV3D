@@ -175,6 +175,8 @@ class ModelViewport(QWidget):
         self._cap_revision += 1
         self._cap_polys = []
         self.set_layer_z(min(self.slice_z, float(target_height_mm)))
+        if self.slice_mode:
+            self._cap_timer.start()
         self.update()
 
     def reset_camera(self):
