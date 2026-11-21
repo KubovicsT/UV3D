@@ -191,6 +191,17 @@ class MainWindow(QMainWindow):
         self.support_casing.setToolTip(
             "Extra radial material around the model. 0 mm supports only vertical overhang columns.")
         form.addRow("Support casing thickness", self.support_casing)
+        self.support_top_cap = QDoubleSpinBox()
+        self.support_top_cap.setDecimals(2)
+        self.support_top_cap.setRange(0, 5)
+        self.support_top_cap.setSingleStep(0.2)
+        self.support_top_cap.setSuffix(" mm")
+        self.support_top_cap.setValue(0.6)
+        self.support_top_cap.setKeyboardTracking(False)
+        self.support_top_cap.setToolTip(
+            "Print solid sacrificial support-only layers above the entire model projection. "
+            "0 mm leaves the uppermost model surfaces exposed.")
+        form.addRow("Support top cover", self.support_top_cap)
         support_warning = QLabel(
             "SUPPORT is a separate proposed material channel; white/varnish "
             "ink is NOT assumed water-soluble. Trapped cavities may be inaccessible.")
@@ -207,7 +218,9 @@ class MainWindow(QMainWindow):
         controls.addWidget(settings)
         self.support_enabled.toggled.connect(self.invalidate_export)
         self.support_casing.valueChanged.connect(self.invalidate_export)
+        self.support_top_cap.valueChanged.connect(self.invalidate_export)
         self.support_enabled.toggled.connect(self.support_casing.setEnabled)
+        self.support_enabled.toggled.connect(self.support_top_cap.setEnabled)
         for ctl in (self.dpi, self.shell, self.body, self.x_pos, self.y_pos):
             if isinstance(ctl, QComboBox):
                 ctl.currentTextChanged.connect(self.invalidate_export)
@@ -549,6 +562,7 @@ class MainWindow(QMainWindow):
             body_material=self.body.currentText(),
             support_enabled=self.support_enabled.isChecked(),
             support_casing_mm=self.support_casing.value(),
+            support_top_cap_mm=self.support_top_cap.value(),
             placement_x_mm=self.x_pos.value(), placement_y_mm=self.y_pos.value()
         )
         self.progress.setRange(0, 100)
@@ -566,6 +580,7 @@ class MainWindow(QMainWindow):
                         self.body, self.x_pos, self.y_pos, self.support_enabled):
             control.setEnabled(not running and self.mesh_path is not None)
         self.support_casing.setEnabled(not running and self.support_enabled.isChecked())
+        self.support_top_cap.setEnabled(not running and self.support_enabled.isChecked())
 
     def on_slicer_progress(self, current, total, seconds):
         total = max(1, total)
