@@ -15,6 +15,7 @@ import trimesh
 from shapely.geometry import LineString
 from shapely.ops import polygonize, unary_union
 from .job_storage import calculate_job_plan, ensure_disk_space
+from .support import effective_raster_margin, generate_support_masks
 
 
 @dataclass
@@ -25,6 +26,8 @@ class SliceSettings:
     margin_mm: float = 3.0
     shell_mm: float = 0.3
     body_material: str = "white"
+    support_enabled: bool = True
+    support_casing_mm: float = 0.6
     placement_x_mm: float = 10.0
     placement_y_mm: float = 10.0
 
@@ -37,6 +40,10 @@ class SliceSettings:
             raise ValueError("DPI must be 72–1200.")
         if not (0 <= self.margin_mm <= 30 and 0.05 <= self.shell_mm <= 5):
             raise ValueError("Invalid margins or shell width.")
+        if not isinstance(self.support_enabled, bool):
+            raise ValueError("Support enabled must be true or false.")
+        if not np.isfinite(self.support_casing_mm) or not (0 <= self.support_casing_mm <= 5):
+            raise ValueError("Support casing must be between 0 and 5 mm.")
         if self.body_material not in ("white", "varnish"):
             raise ValueError("Body material must be white or varnish.")
         if self.placement_x_mm < 0 or self.placement_y_mm < 0:
@@ -181,7 +188,7 @@ def _paint_polygon_mask(polys, size: tuple[int, int], pxy) -> Image.Image:
 
 def _slice_model_legacy(filename: str | Path, output_dir: str | Path, settings: SliceSettings,
                 on_progress=None, profile: MachineProfile | None = None,
-                on_plan=None) -> Path:
+                on_plan=None, on_stage=None) -> Path:
     """Generate numbered PNG masks and manifest; all operations are offline.
 
     Images share size/origin. Outputs are NOT directly printer-ready: RIP white and
@@ -197,18 +204,19 @@ def _slice_model_legacy(filename: str | Path, output_dir: str | Path, settings: 
     if model_height > 180:
         raise ValueError("Model exceeds 180 mm nominal media clearance; no verified 3D build envelope exists.")
     pixel_per_mm = settings.dpi / 25.4
-    w = math.ceil((model_width + 2 * settings.margin_mm) * pixel_per_mm)
-    h = math.ceil((model_depth + 2 * settings.margin_mm) * pixel_per_mm)
+    raster_margin = effective_raster_margin(settings)
+    w = math.ceil((model_width + 2 * raster_margin) * pixel_per_mm)
+    h = math.ceil((model_depth + 2 * raster_margin) * pixel_per_mm)
     if w <= 0 or h <= 0 or w * h > 16_000_000:
         raise ValueError("Raster exceeds 16 million pixels. Reduce model size or DPI.")
     if settings.placement_x_mm + (w / pixel_per_mm) > machine.bed_x_mm or settings.placement_y_mm + (h / pixel_per_mm) > machine.bed_y_mm:
         raise ValueError("Raster placement exceeds the configured 600×900 mm bed.")
     n = math.ceil(model_height / settings.layer_mm)
-    plan = calculate_job_plan(w, h, n)
+    plan = calculate_job_plan(w, h, n, support_enabled=settings.support_enabled)
 
     def pxy(x: float, y: float) -> tuple[int, int]:
-        return (round((x - minimum[0] + settings.margin_mm) * pixel_per_mm),
-                round((maximum[1] - y + settings.margin_mm) * pixel_per_mm))
+        return (round((x - minimum[0] + raster_margin) * pixel_per_mm),
+                round((maximum[1] - y + raster_margin) * pixel_per_mm))
 
     out = Path(output_dir)
     if out.exists() and any(out.iterdir()):
@@ -230,16 +238,25 @@ def _slice_model_legacy(filename: str | Path, output_dir: str | Path, settings: 
         "model_bounds_mm": [minimum.tolist(), maximum.tolist()],
         "raster_size_px": [w, h],
         "raster_footprint_mm": [w / pixel_per_mm, h / pixel_per_mm],
+        "effective_raster_margin_mm": raster_margin,
+        "solid_volume": True,
+        "support": {"enabled": settings.support_enabled, "casing_mm": settings.support_casing_mm,
+                    "material": "UNASSIGNED - requires separately validated removable support ink"},
         "storage_plan": plan.as_dict(),
         "warnings": warnings + [
             "PrintExp .prt generation and printer API are NOT integrated.",
-            "Supports, overhang analysis, true texture mapping and color management are NOT implemented.",
+            "Experimental conformal support geometry is not validated for real material deposition or dissolving.",
+            "Support trapped in sealed cavities may not be removable.",
+            "Overhang stability, curing and color management are NOT verified.",
             "White and varnish are grayscale mask proposals; correct RIP spot channels must be validated.",
             "Layer thickness is a target, not validated cured material thickness."
         ],
         "layers": []
     }
     stroke_width = max(1, round(settings.shell_mm * pixel_per_mm))
+    progress_total = n * (2 if settings.support_enabled else 1)
+    if on_stage:
+        on_stage("Generating solid model volume masks and exterior color boundaries")
     for index in range(n):
         ensure_disk_space(out, plan.pixels_per_layer)
         z = min(minimum[2] + (index + 0.5) * settings.layer_mm, maximum[2] - 1e-6)
@@ -271,7 +288,17 @@ def _slice_model_legacy(filename: str | Path, output_dir: str | Path, settings: 
             "contains_geometry": bool(polys)
         })
         if on_progress:
-            on_progress(index + 1, n)
+            on_progress(index + 1, progress_total)
+    if settings.support_enabled:
+        if on_stage:
+            on_stage("Generating conformal support masks from top down to build plate")
+        def support_progress(completed, _total):
+            if on_progress:
+                on_progress(n + completed, progress_total)
+        manifest["support"]["statistics"] = generate_support_masks(
+            out, manifest["layers"], settings.body_material,
+            settings.support_casing_mm, settings.dpi, settings.layer_mm,
+            on_progress=support_progress)
     path = out / "job.json"
     path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return path
@@ -280,7 +307,8 @@ def _slice_model_legacy(filename: str | Path, output_dir: str | Path, settings: 
 
 def slice_model(filename: str | Path, output_dir: str | Path, settings: SliceSettings,
                 on_progress=None, profile: MachineProfile | None = None,
-                on_plan=None) -> Path:
+                on_plan=None, on_stage=None) -> Path:
     """Default fast offline slicer; API and manifest kept compatible."""
     from .fast_slicer import slice_fast
-    return slice_fast(filename, output_dir, settings, on_progress, profile, on_plan=on_plan)
+    return slice_fast(filename, output_dir, settings, on_progress, profile,
+                      on_plan=on_plan, on_stage=on_stage)
