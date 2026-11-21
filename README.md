@@ -1,6 +1,6 @@
 # UV3D
 
-**Prototype v0.7 — offline experimental UV slicing. No printhead, motor, UV lamp, or printer control is implemented.**
+**Prototype v0.8 — offline experimental UV slicing and multihead gantry/UV curing preview. No printhead, motor, UV lamp, or printer control is implemented.**
 
 UV3D targets the Gongzheng H6090EI (three Epson i3200 heads, CMYK/white/varnish), with FlexiPRINT MiniTX GongZheng Edition and Gongzheng PrintExp. It is independent of both vendor applications.
 
@@ -134,6 +134,10 @@ A filled 3D sacrificial-support surface is generated from **every actual exporte
 - **Printhead speed (printing, mm/s)**: virtual ink-deposition scan motion, initially 300 mm/s
 - **Movement speed (non-printing, mm/s)**: virtual travel, pass repositioning, return and Z adjustment, initially 600 mm/s
 - **Passes per 33.8 mm band**: adjustable 1–32 (illustrative default 6), changes estimated print duration
+- **Printing direction:** bidirectional (print both X directions) or one-direction printing with non-printing returns
+- **Printhead opacity:** adjustable 0–100% to see the currently printed layer through the carriage
+- **Current layer colors:** independent highlights for actively printed model and support (orange/cyan by default) without changing completed geometry
+- **Gantry setup:** add, position, resize and assign material to multiple heads; add/position/resize UV curing lamps; virtual UV-only sweeps extend travel and ETA
 - **Estimated job time, elapsed time, remaining time and progress %**: based on all printing and non-print motion segments; separate from replay speed
 - **Replay speed (×)**: changes how quickly virtual time advances in real time
 - **Support color / support opacity**: changes only the viewer; 0% hides the sacrificial material and 100% makes it opaque
@@ -142,6 +146,18 @@ A filled 3D sacrificial-support surface is generated from **every actual exporte
 The virtual printhead is a **real-size Epson i3200-U1 body (69.1 × 59.5 × 35.6 mm)**, with **33.8 mm effective print swath** according to Epson's specifications. At each layer, continuous X scans run at the print speed, reposition/stepover moves at the travel speed, a visible return goes to the next layer's start, and a continuous Z move raises the head before new printing. When the head already finishes at that position, no unnecessary return is inserted. The timer, progress percentage and ETA include all these motion segments.
 
 This remains an **illustrative print-time estimate**, not a measured H6090EI print time: the machine's three-head carriage spacing, real RIP pass arrangement, UV curing duration, acceleration and controller travel limits have not been verified. The simulation does not issue PrintExp/Hoson motor or printing commands. The modeled head dimensions are the individual i3200-U1 head body, not the full installed 3-head carriage. Epson specifications: https://inkjet-solution.epson.com/products/i-series.html
+
+### Gantry setup — printheads and UV lamps (v0.8)
+
+The separate simulation window has a **Gantry setup — heads & UV lamps** tab. It contains a real editable layout for the virtual carriage:
+
+- **Heads:** Add/remove or enable/disable multiple heads; set X/Y offsets, body dimensions and swath; assign Color/CMYK, White, Varnish, or experimental Support.
+- **Lamps:** Add/remove or enable/disable multiple UV lamps; edit X/Y offsets, illuminated footprint width/depth and housing height.
+- **UV curing passes:** Choose 1–5 coverage sweeps for each lamp. After layer deposition, the gantry makes visible UV-only moves so each enabled lamp footprint passes over the entire raster. During these scans the configured lamp illuminates a moving gold rectangle on the printed layer.
+- **One assembly:** All heads, UV lamps and the connecting carriage beam move together. Their layout affects scan travel, Y-band count, UV movement time, progress and ETA. Movement speed applies to UV-only sweeps, not print speed.
+- **Stored entirely within the app folder:** workspace/machine/gantry.json. Changes update virtual geometry and ETA without re-slicing or changing firmware.
+
+The initial three-head CMYK/white/varnish layout and two UV lamps are **unmeasured editable examples**. The individual i3200-U1 head-body dimensions are known, but lamp sizes, mounting positions and multi-head spacing must be measured on the actual machine. The simulator shows footprint overlap, **not** verified UV energy, dose, ink curing or printhead safety. Support assignment is only a proposed virtual material channel; no soluble support ink or physical support nozzle has been verified.
 
 ### Qt timer/thread crash fix (0.6.3)
 
