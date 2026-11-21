@@ -79,6 +79,9 @@ void main() {
         outColor = vColor;
     } else if (uMode == 5) {
         outColor = uSupportTint;
+    } else if (uMode == 6) {
+        // Simulation printhead only: retain head face shading with user alpha.
+        outColor = vec4(vColor.rgb, vColor.a * uSupportTint.a);
     } else {
         vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
         float light = 0.52 + 0.48 * abs(dot(N, normalize(vec3(0.3, 0.5, 0.8))));
