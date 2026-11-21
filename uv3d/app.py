@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 from .core import MachineProfile, SliceSettings, load_mesh
 from .gui_slicer import SlicerController
 from .support_preview import build_support_wireframe
+from .simulation_widget import SimulationWidget
 from .diagnostics import install_gui_diagnostics
 from .viewport import ModelViewport as SoftwareModelViewport, build_preview_geometry
 
@@ -110,9 +111,6 @@ class MainWindow(QMainWindow):
         self.support_preview_thread = None
         self.support_preview_worker = None
         self.source_preview = None
-        self.sim_position = 0
-        self.sim_timer = QTimer(self)
-        self.sim_timer.timeout.connect(self.simulation_tick)
         WORKSPACE.mkdir(parents=True, exist_ok=True)
         (WORKSPACE / "jobs").mkdir(exist_ok=True)
         tabs = QTabWidget()
@@ -350,25 +348,9 @@ class MainWindow(QMainWindow):
         self.viewport.reset_camera()
 
     def build_simulator(self):
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        label = QLabel("SIMULATION ONLY — does not connect to PrintExp, FlexiPRINT, or motors.")
-        label.setStyleSheet("font-weight: bold; color: #b56700;")
-        layout.addWidget(label)
-        self.sim_detail = QLabel("Generate a job first.")
-        layout.addWidget(self.sim_detail)
-        self.sim_progress = QProgressBar()
-        layout.addWidget(self.sim_progress)
-        buttons = QHBoxLayout()
-        start = QPushButton("Start offline simulation")
-        stop = QPushButton("Stop simulation")
-        start.clicked.connect(self.start_simulation)
-        stop.clicked.connect(self.sim_timer.stop)
-        buttons.addWidget(start)
-        buttons.addWidget(stop)
-        layout.addLayout(buttons)
-        layout.addStretch(1)
-        return panel
+        self.simulator = SimulationWidget(
+            ROOT, self, gpu_enabled=getattr(ModelViewport, "FULL_RESOLUTION", False))
+        return self.simulator
 
     def build_machine(self):
         panel = QWidget()
@@ -554,8 +536,9 @@ class MainWindow(QMainWindow):
         self.output_label.setText("Model/settings changed — regenerate masks.")
         self.preview_label.setPixmap(QPixmap())
         self.preview_label.setText("Export masks to preview updated channels")
-        self.sim_timer.stop()
-        self.sim_detail.setText("Previous job invalidated by model/settings change.")
+        self.simulator.pause()
+        # A previously exported simulation remains available for comparison.
+        # Changing current slicer settings does not silently change old masks.
 
     def start_export(self):
         if not self.mesh_path or self.slicer.running or self.import_thread is not None:
@@ -628,7 +611,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Offline layer masks generated successfully")
         for warning in self.job_data["warnings"]:
             self.log.appendPlainText("WARNING: " + warning)
-        self.sim_detail.setText(f"Loaded offline job: {n} layers")
+        self.simulator.load_job(self.job_path, self.source_mesh, self.source_preview)
+        self.log.appendPlainText("Simulation prepared: open Print queue — simulation tab.")
         self.viewport.set_support_preview_lines(None)
         support = self.job_data.get("support", {})
         if support.get("enabled"):
@@ -712,23 +696,13 @@ class MainWindow(QMainWindow):
             self.preview_label.setPixmap(QPixmap())
             self.preview_label.setText(f"Preview unavailable: {exc}")
 
-    def start_simulation(self):
-        if not self.job_data:
-            QMessageBox.information(self, "No job", "Generate an offline job before simulating.")
-            return
-        self.sim_position = 0
-        self.sim_progress.setValue(0)
-        self.sim_timer.start(100)
-
-    def simulation_tick(self):
-        total = len(self.job_data["layers"])
-        self.sim_position += 1
-        self.sim_progress.setValue(round(100 * self.sim_position / total))
-        self.sim_detail.setText(f"Simulated layer {self.sim_position}/{total}; no machine commands issued.")
-        if self.sim_position >= total:
-            self.sim_timer.stop()
-
     def closeEvent(self, event):
+        if self.simulator.busy:
+            QMessageBox.information(self, "Simulation loading",
+                                    "Let the simulation preview finish loading before closing.")
+            event.ignore()
+            return
+        self.simulator.pause()
         if (self.support_preview_thread is not None
                 and self.support_preview_thread.isRunning()):
             QMessageBox.information(self, "Support preview preparing",
@@ -750,8 +724,8 @@ class MainWindow(QMainWindow):
         if not script.is_file() or sys.platform != "win32":
             QMessageBox.warning(self, "Update unavailable", "Windows updater script not found.")
             return
-        if self.slicer.running or self.import_thread is not None:
-            QMessageBox.warning(self, "Busy", "Finish model import/export before updating.")
+        if self.slicer.running or self.import_thread is not None or self.simulator.busy:
+            QMessageBox.warning(self, "Busy", "Finish model import/export/simulation loading before updating.")
             return
         if QMessageBox.question(self, "Update from main",
                                 "UV3D will close, fast-forward from GitHub/main, check dependencies "
