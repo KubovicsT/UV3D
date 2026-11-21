@@ -1,7 +1,8 @@
-"""UV3D desktop GUI. OFFLINE ONLY: no hardware control in this version."""
+"""UV3D desktop GUI. OFFLINE ONLY — not connected to any printer hardware."""
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -11,11 +12,13 @@ from datetime import datetime
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
-    QPushButton, QScrollArea, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+    QGroupBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPlainTextEdit,
+    QProgressBar, QPushButton, QSlider, QSpinBox, QSplitter, QTabWidget,
+    QVBoxLayout, QWidget,
 )
-from .core import MachineProfile, SliceSettings, load_mesh, slice_model
+from .core import MachineProfile, SliceSettings, load_mesh, prepare_mesh, slice_model
+from .viewport import ModelViewport
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE = ROOT / "workspace"
@@ -42,9 +45,11 @@ class SliceWorker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("UV3D — Offline Slicer / Gongzheng H6090EI")
-        self.resize(1200, 780)
+        self.setWindowTitle("UV3D — 3D Slicer / Gongzheng H6090EI (offline)")
+        self.resize(1330, 850)
         self.mesh_path: Path | None = None
+        self.source_mesh = None
+        self.preview_mesh = None
         self.job_path: Path | None = None
         self.job_data: dict | None = None
         self.worker_thread = None
@@ -69,6 +74,7 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(panel)
         split = QSplitter(Qt.Horizontal)
         layout.addWidget(split)
+
         left = QWidget()
         controls = QVBoxLayout(left)
         open_button = QPushButton("Open 3D model…")
@@ -77,14 +83,32 @@ class MainWindow(QMainWindow):
         self.model_info = QLabel("No model loaded.\nSTL, OBJ, GLB, GLTF, 3MF, PLY")
         self.model_info.setWordWrap(True)
         controls.addWidget(self.model_info)
-        settings = QGroupBox("Slice settings (unverified material targets)")
+
+        settings = QGroupBox("Model dimensions and slice settings")
         form = QFormLayout(settings)
+        self.model_height = QDoubleSpinBox()
+        self.model_height.setDecimals(3)
+        self.model_height.setRange(0.05, 180.0)
+        self.model_height.setSingleStep(1.0)
+        self.model_height.setSuffix(" mm")
+        self.model_height.setKeyboardTracking(False)
+        self.model_height.setEnabled(False)
+        self.model_height.valueChanged.connect(self.on_height_changed)
+        form.addRow("Model height (uniform scaling)", self.model_height)
+
         self.layer = QDoubleSpinBox()
         self.layer.setDecimals(3)
         self.layer.setRange(0.01, 1.0)
         self.layer.setSingleStep(0.01)
         self.layer.setValue(0.05)
-        form.addRow("Layer thickness (mm)", self.layer)
+        self.layer.setSuffix(" mm")
+        self.layer.setKeyboardTracking(False)
+        self.layer.valueChanged.connect(self.refresh_layer_range)
+        form.addRow("Target layer thickness", self.layer)
+
+        self.layer_count = QLabel("—")
+        form.addRow("Preview layer count", self.layer_count)
+
         self.dpi = QSpinBox()
         self.dpi.setRange(72, 1200)
         self.dpi.setValue(300)
@@ -106,6 +130,12 @@ class MainWindow(QMainWindow):
         self.y_pos.setValue(10)
         form.addRow("Raster offset Y (mm)", self.y_pos)
         controls.addWidget(settings)
+        for ctl in (self.dpi, self.shell, self.body, self.x_pos, self.y_pos):
+            if isinstance(ctl, QComboBox):
+                ctl.currentTextChanged.connect(self.invalidate_export)
+            else:
+                ctl.valueChanged.connect(self.invalidate_export)
+
         self.export_button = QPushButton("Generate offline layer masks")
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.start_export)
@@ -124,31 +154,72 @@ class MainWindow(QMainWindow):
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
-        self.preview_label = QLabel("Generate a job to preview slices")
-        self.preview_label.setMinimumSize(300, 300)
-        self.preview_label.setAlignment(Qt.AlignCenter)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(self.preview_label)
-        right_layout.addWidget(scroll)
-        navigation = QHBoxLayout()
+        top = QHBoxLayout()
+        title = QLabel("3D build preview")
+        title.setStyleSheet("font-size: 15px; font-weight: 600;")
+        top.addWidget(title)
+        top.addStretch(1)
+        self.slice_checkbox = QCheckBox("Show layers / ghost silhouette")
+        self.slice_checkbox.setChecked(True)
+        self.slice_checkbox.toggled.connect(self.on_slice_mode_changed)
+        top.addWidget(self.slice_checkbox)
+        reset = QPushButton("Reset view")
+        reset.clicked.connect(self.reset_view)
+        top.addWidget(reset)
+        right_layout.addLayout(top)
+
+        view_row = QHBoxLayout()
+        self.viewport = ModelViewport()
+        view_row.addWidget(self.viewport, stretch=1)
+        slider_box = QVBoxLayout()
+        top_label = QLabel("Top")
+        top_label.setAlignment(Qt.AlignCenter)
+        slider_box.addWidget(top_label)
+        self.slice_slider = QSlider(Qt.Vertical)
+        self.slice_slider.setRange(1, 1)
+        self.slice_slider.setEnabled(False)
+        self.slice_slider.valueChanged.connect(self.on_slider_changed)
+        slider_box.addWidget(self.slice_slider, stretch=1, alignment=Qt.AlignHCenter)
+        bottom_label = QLabel("Bed")
+        bottom_label.setAlignment(Qt.AlignCenter)
+        slider_box.addWidget(bottom_label)
+        view_row.addLayout(slider_box)
+        right_layout.addLayout(view_row, stretch=6)
+
+        layer_nav = QHBoxLayout()
         self.layer_select = QSpinBox()
+        self.layer_select.setRange(1, 1)
         self.layer_select.setEnabled(False)
-        self.layer_select.valueChanged.connect(self.show_slice)
+        self.layer_select.valueChanged.connect(self.on_spin_changed)
+        self.slice_position = QLabel("Import a model to preview layers")
+        layer_nav.addWidget(QLabel("Layer"))
+        layer_nav.addWidget(self.layer_select)
+        layer_nav.addWidget(self.slice_position, stretch=1)
+        right_layout.addLayout(layer_nav)
+
+        bottom = QHBoxLayout()
+        self.preview_label = QLabel("Export masks to preview channel images")
+        self.preview_label.setMinimumSize(180, 100)
+        self.preview_label.setMaximumHeight(125)
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setStyleSheet("background: #18212d; color: #b0bfcf;")
+        bottom.addWidget(self.preview_label, stretch=1)
+        channel_column = QVBoxLayout()
+        channel_column.addWidget(QLabel("Exported mask channel"))
         self.channel = QComboBox()
         self.channel.addItems(["color", "white", "varnish"])
         self.channel.currentTextChanged.connect(self.show_slice)
-        navigation.addWidget(QLabel("Layer"))
-        navigation.addWidget(self.layer_select)
-        navigation.addWidget(QLabel("Channel"))
-        navigation.addWidget(self.channel)
-        right_layout.addLayout(navigation)
-        warning = QLabel("Preview masks are NOT PrintExp .prt files or calibrated spot-color channels.")
-        warning.setWordWrap(True)
-        right_layout.addWidget(warning)
+        channel_column.addWidget(self.channel)
+        channel_column.addWidget(QLabel("Preview only — not a printer-ready RIP job."))
+        channel_column.addStretch(1)
+        bottom.addLayout(channel_column)
+        right_layout.addLayout(bottom, stretch=1)
         split.addWidget(right)
-        split.setSizes([450, 700])
+        split.setSizes([370, 960])
         return panel
+
+    def reset_view(self):
+        self.viewport.reset_camera()
 
     def build_simulator(self):
         panel = QWidget()
@@ -200,7 +271,13 @@ class MainWindow(QMainWindow):
         filename, _ = QFileDialog.getOpenFileName(
             self, "Choose 3D model", str(WORKSPACE),
             "3D meshes (*.stl *.obj *.glb *.gltf *.3mf *.ply)")
-        if not filename:
+        if filename:
+            self.load_model_file(filename)
+
+    def load_model_file(self, filename: str | Path):
+        """Public entry point shared by Open dialog and GUI smoke tests."""
+        if self.worker_thread is not None:
+            QMessageBox.warning(self, "Busy", "Finish generating layers before importing a new model.")
             return
         try:
             mesh, warnings = load_mesh(filename)
@@ -208,29 +285,116 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Model import failed", str(exc))
             return
         self.mesh_path = Path(filename)
-        dims = mesh.extents
-        self.model_info.setText(f"{self.mesh_path.name}\n"
-                                f"Dimensions: {dims[0]:.2f} × {dims[1]:.2f} × {dims[2]:.2f} mm\n"
-                                f"Triangles: {len(mesh.faces):,}; watertight: {mesh.is_watertight}")
+        self.source_mesh = mesh
+        self.model_height.blockSignals(True)
+        # Actual model height can be greater than the tested nominal clearance.
+        # Clamp only the editor target; never silently export the original geometry.
+        self.model_height.setValue(min(max(float(mesh.extents[2]), 0.05), 180.0))
+        self.model_height.setEnabled(True)
+        self.model_height.blockSignals(False)
+        self.on_height_changed()
         self.export_button.setEnabled(True)
         self.log.appendPlainText(f"Imported: {filename}")
         for warning in warnings:
             self.log.appendPlainText("WARNING: " + warning)
 
+    def on_height_changed(self, *_):
+        if self.source_mesh is None:
+            return
+        target = self.model_height.value()
+        try:
+            self.preview_mesh = prepare_mesh(self.source_mesh, target)
+            self.viewport.set_mesh(self.preview_mesh, reset_camera=True)
+        except Exception as exc:
+            self.log.appendPlainText("Unable to resize mesh: " + str(exc))
+            return
+        orig = self.source_mesh.extents
+        dims = self.preview_mesh.extents
+        scale = dims[2] / orig[2]
+        self.model_info.setText(
+            f"{self.mesh_path.name if self.mesh_path else 'Model'}\n"
+            f"Original: {orig[0]:.2f} × {orig[1]:.2f} × {orig[2]:.2f} mm\n"
+            f"Resized: {dims[0]:.2f} × {dims[1]:.2f} × {dims[2]:.2f} mm\n"
+            f"Uniform scale: {scale:.4f}×    Faces: {len(self.preview_mesh.faces):,}\n"
+            f"Watertight: {self.preview_mesh.is_watertight}"
+        )
+        self.refresh_layer_range()
+
+    def refresh_layer_range(self, *_):
+        if self.preview_mesh is None:
+            return
+        n = max(1, math.ceil(float(self.preview_mesh.extents[2]) / self.layer.value()))
+        self.layer_count.setText(f"{n:,}")
+        previous = self.layer_select.value()
+        self.layer_select.blockSignals(True)
+        self.slice_slider.blockSignals(True)
+        self.layer_select.setRange(1, n)
+        self.slice_slider.setRange(1, n)
+        self.layer_select.setValue(min(previous if self.layer_select.isEnabled() else n, n))
+        self.slice_slider.setValue(self.layer_select.value())
+        self.slice_slider.setEnabled(True)
+        self.layer_select.setEnabled(True)
+        self.layer_select.blockSignals(False)
+        self.slice_slider.blockSignals(False)
+        self.on_layer_changed(self.layer_select.value())
+        self.invalidate_export()
+
+    def on_slice_mode_changed(self, checked):
+        self.viewport.set_slice_mode(bool(checked))
+        self.slice_slider.setEnabled(self.preview_mesh is not None and bool(checked))
+        self.layer_select.setEnabled(self.preview_mesh is not None and bool(checked))
+        self.on_layer_changed(self.layer_select.value())
+
+    def on_slider_changed(self, index: int):
+        if self.layer_select.value() != index:
+            self.layer_select.setValue(index)
+        else:
+            self.on_layer_changed(index)
+
+    def on_spin_changed(self, index: int):
+        if self.slice_slider.value() != index:
+            self.slice_slider.setValue(index)
+        else:
+            self.on_layer_changed(index)
+
+    def on_layer_changed(self, index: int):
+        if self.preview_mesh is None:
+            return
+        max_z = float(self.preview_mesh.extents[2])
+        z = min(max_z, (index - 0.5) * self.layer.value())
+        self.slice_position.setText(f"{index:,} / {self.layer_select.maximum():,}   ·   Z = {z:.3f} mm")
+        self.viewport.set_slice_mode(self.slice_checkbox.isChecked())
+        self.viewport.set_layer_z(z)
+        self.show_slice()
+
+    def invalidate_export(self, *_):
+        if self.job_data is None:
+            return
+        self.job_data = None
+        self.job_path = None
+        self.output_label.setText("Model/settings changed — regenerate masks.")
+        self.preview_label.setPixmap(QPixmap())
+        self.preview_label.setText("Export masks to preview updated channels")
+        self.sim_timer.stop()
+        self.sim_detail.setText("Previous job invalidated by model/settings change.")
+
     def start_export(self):
         if not self.mesh_path or self.worker_thread is not None:
             return
-        settings = SliceSettings(layer_mm=self.layer.value(), dpi=self.dpi.value(),
-                                 shell_mm=self.shell.value(), body_material=self.body.currentText(),
-                                 placement_x_mm=self.x_pos.value(), placement_y_mm=self.y_pos.value())
+        settings = SliceSettings(
+            layer_mm=self.layer.value(), target_height_mm=self.model_height.value(),
+            dpi=self.dpi.value(), shell_mm=self.shell.value(),
+            body_material=self.body.currentText(),
+            placement_x_mm=self.x_pos.value(), placement_y_mm=self.y_pos.value()
+        )
         job_name = self.mesh_path.stem[:50] + "_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         out = WORKSPACE / "jobs" / job_name
         self.export_button.setEnabled(False)
         self.progress.setValue(0)
-        self.log.appendPlainText(f"Generating offline export: {out}")
+        self.log.appendPlainText(f"Generating scaled offline export: {out}")
         thread = QThread(self)
         worker = SliceWorker(self.mesh_path, out, settings)
-        self.worker = worker  # Keep Python receiver alive until QThread has exited.
+        self.worker = worker
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(lambda current, total: self.progress.setValue(round(100 * current / total)))
@@ -253,12 +417,9 @@ class MainWindow(QMainWindow):
         self.job_path = Path(job_path)
         self.job_data = json.loads(self.job_path.read_text(encoding="utf-8"))
         n = len(self.job_data["layers"])
-        self.layer_select.setRange(1, n)
-        self.layer_select.setEnabled(True)
-        self.layer_select.setValue(1)
         self.show_slice()
-        self.output_label.setText(f"{n} layers exported to:\n{self.job_path.parent}")
-        self.log.appendPlainText(f"Completed {n} OFFLINE layers.")
+        self.output_label.setText(f"{n:,} scaled layers exported to:\n{self.job_path.parent}")
+        self.log.appendPlainText(f"Exported {n} OFFLINE layers, scaled height {self.job_data['scaled_dimensions_mm'][2]:.3f} mm.")
         for warning in self.job_data["warnings"]:
             self.log.appendPlainText("WARNING: " + warning)
         self.sim_detail.setText(f"Loaded offline job: {n} layers")
@@ -270,14 +431,13 @@ class MainWindow(QMainWindow):
     def show_slice(self, *_):
         if not self.job_data or not self.job_path:
             return
-        idx = self.layer_select.value() - 1
+        idx = min(self.layer_select.value() - 1, len(self.job_data["layers"]) - 1)
         layer = self.job_data["layers"][idx]
-        file = self.job_path.parent / layer[self.channel.currentText()]
-        image = QPixmap(str(file))
+        image = QPixmap(str(self.job_path.parent / layer[self.channel.currentText()]))
         if image.isNull():
             self.preview_label.setText("Unable to load preview")
             return
-        self.preview_label.setPixmap(image.scaled(700, 600, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.preview_label.setPixmap(image.scaled(260, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
     def start_simulation(self):
         if not self.job_data:
