@@ -42,43 +42,42 @@ uniform int uPasses;
 uniform int uPassesCompleted;
 uniform int uScanDirection;
 uniform bool uPrinting;
-uniform float uRowProgress;
+uniform float uModelProgress;
+uniform float uSupportProgress;
 uniform bool uFullLayer;
 
-void main() {
-    // All raster rows follow the actual head's Y swath bands. Previous
-    // bands are complete; future bands have not been printed yet.
+float printedCoverage(float physicalScanProgress) {
     int row = min(uRows - 1,
-                  int(floor(clamp(vUV.y, 0.0, 0.9999999) * float(uRows))));
-    float coverage = 0.0;
-    if (uFullLayer || row < uRowIndex) {
-        coverage = 1.0;
-    } else if (row == uRowIndex) {
-        // The nozzle traverses the image coordinate matching the physical
-        // printhead. A reverse pass MUST paint right-to-left (not based on
-        // row parity). Non-printing return moves deposit nothing.
-        float already = float(uPassesCompleted);
-        float current = 0.0;
-        if (uPrinting) {
-            float p = clamp(uRowProgress, 0.0, 1.0);
-            bool reached = (uScanDirection > 0) ? (vUV.x <= p)
-                                                   : (vUV.x >= 1.0 - p);
-            current = reached ? 1.0 : 0.0;
-        }
-        coverage = clamp((already + current) / float(max(1,uPasses)), 0.0, 1.0);
+        int(floor(clamp(vUV.y, 0.0, 0.9999999) * float(uRows))));
+    if (uFullLayer || row < uRowIndex) return 1.0;
+    if (row > uRowIndex) return 0.0;
+    float current = 0.0;
+    if (uPrinting) {
+        float p = clamp(physicalScanProgress, 0.0, 1.0);
+        bool passed = (uScanDirection > 0) ? (vUV.x <= p)
+                                           : (vUV.x >= 1.0-p);
+        current = passed ? 1.0 : 0.0;
     }
-    if (coverage <= 0.0001) discard;
+    return clamp((float(uPassesCompleted) + current) /
+                 float(max(1, uPasses)), 0.0, 1.0);
+}
+
+void main() {
+    // Active model and support heads may be displaced along X. Each mask
+    // becomes visible as ITS OWN material head actually crosses that pixel.
     float body = texture(uBody, vUV).r;
     float support = texture(uSupport, vUV).r;
     if (body > 0.03) {
-        // Highlight only the ACTIVE printing layer, not the finished model.
-        // Retain a small amount of source color for detail recognition.
+        float coverage = printedCoverage(uModelProgress);
+        if (coverage <= 0.0001) discard;
         vec4 source = texture(uColor, vUV);
         vec3 tint = mix(uCurrentModelTint, source.rgb, 0.12 * source.a);
         outColor = vec4(tint, coverage * body);
     } else if (support > 0.03) {
-        // Different color from the current model and finished support shell.
-        outColor = vec4(uCurrentSupportTint, coverage * support * uSupportTint.a);
+        float coverage = printedCoverage(uSupportProgress);
+        if (coverage <= 0.0001) discard;
+        outColor = vec4(uCurrentSupportTint,
+                        coverage * support * uSupportTint.a);
     } else {
         discard;
     }
@@ -420,7 +419,8 @@ class SimulationViewport(GpuModelViewport):
                            frame.scan_direction)
             GL.glUniform1i(GL.glGetUniformLocation(self._program, "uPrinting"),
                            int(frame.printing))
-            self._set1f("uRowProgress", frame.row_fraction)
+            self._set1f("uModelProgress", frame.model_scan_fraction)
+            self._set1f("uSupportProgress", frame.support_scan_fraction)
             GL.glUniform1i(GL.glGetUniformLocation(self._program, "uFullLayer"),
                            int(frame.completed))
             GL.glEnable(GL.GL_BLEND)
@@ -529,14 +529,16 @@ class SimulationViewport(GpuModelViewport):
             components.append((make_component_cuboid(
                 x,y,z,head.width_mm,head.depth_mm,head.height_mm,
                 palette[head.material]),self._head_alpha))
-        for lamp in lamps:
+        for lamp_index,lamp in enumerate(lamps):
             x=gx+lamp.offset_x_mm
             y=gy+lamp.offset_y_mm
             include(x,y,lamp.width_mm,lamp.depth_mm)
             highest=max(highest,lamp.body_height_mm)
             lit=self.frame.lamp_active and (
                 not self.frame.curing or
-                config.lamps.index(lamp)==self.frame.active_lamp_index)
+                any(i == self.frame.active_lamp_index
+                    for i, original in enumerate(config.lamps)
+                    if original is lamp))
             components.append((make_component_cuboid(
                 x,y,z+max(0,highest-lamp.body_height_mm),
                 lamp.width_mm,lamp.depth_mm,lamp.body_height_mm,
