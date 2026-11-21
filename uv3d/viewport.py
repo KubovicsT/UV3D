@@ -225,6 +225,14 @@ class ModelViewport(QWidget):
             self._cap_timer.start()
         self.update()
 
+    def set_support_preview_lines(self, lines):
+        # GPU mode is the intended host for the sampled 3D wireframe.
+        # Software fallback retains the 2D support/combined mask preview.
+        self._support_preview_lines = lines
+
+    def set_show_support_preview(self, active):
+        self._support_preview_visible = bool(active)
+
     def reset_camera(self):
         self.yaw, self.pitch = camera_preset('Isometric')
         self.zoom = 1.0
