@@ -4,7 +4,11 @@ Requires the open-source glslangValidator command (CI only, not UV3D runtime).
 """
 from pathlib import Path
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
+
+# Run directly from scripts/ in CI without requiring a system-wide install.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from uv3d.gpu_viewport import VERTEX_SHADER, FRAGMENT_SHADER
 from uv3d.simulation_viewport import SIM_LAYER_VERTEX, SIM_LAYER_FRAGMENT
