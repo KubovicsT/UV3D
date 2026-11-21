@@ -75,3 +75,17 @@ def test_gui_height_and_slider_before_export(tmp_path):
     image = gui.viewport.grab().toImage()
     assert image.width() > 0 and image.height() > 0
     gui.close()
+
+
+def test_detailed_model_preview_keeps_surface_and_colors():
+    from uv3d.viewport import build_preview_geometry
+
+    sphere = trimesh.creation.icosphere(subdivisions=4)
+    sphere.visual.face_colors = [80, 145, 220, 255]
+    triangles, normals, colors = build_preview_geometry(sphere, max_faces=750)
+    assert 100 < len(triangles) <= 750
+    assert len(normals) == len(triangles) == len(colors)
+    assert triangles.shape[1:] == (3, 3)
+    assert np.allclose(colors[:, 0], 80)
+    assert np.max(triangles[:, 2]) > 0.85
+    assert np.min(triangles[:, 2]) < -0.85
