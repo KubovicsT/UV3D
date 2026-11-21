@@ -30,3 +30,22 @@ def zoom(current: float, steps: float) -> float:
 
 def preset(name: str) -> tuple[float, float]:
     return PRESETS[name]
+
+
+
+def pan_focal_delta(yaw: float, pitch: float, dx: float, dy_down: float,
+                    pixels_per_mm: float) -> tuple[float, float, float]:
+    """Pan the orbit *pivot*, not just the picture, as Supp does.
+
+    For an orthographic Z-up camera, invert the same right/down view basis
+    used by the UV3D shader. Keeping the focal point in world coordinates means
+    subsequent orbiting remains centered on the panned viewpoint.
+    """
+    if pixels_per_mm <= 0:
+        return (0., 0., 0.)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    sp, cp = math.sin(pitch), math.cos(pitch)
+    r = (cy, -sy, 0.)
+    down = (sp * sy, sp * cy, -cp)
+    return tuple((-dx * r[i] - dy_down * down[i]) / pixels_per_mm
+                 for i in range(3))
