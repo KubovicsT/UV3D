@@ -697,11 +697,8 @@ class MainWindow(QMainWindow):
             self.preview_label.setText(f"Preview unavailable: {exc}")
 
     def closeEvent(self, event):
-        if self.simulator.busy:
-            QMessageBox.information(self, "Simulation loading",
-                                    "Let the simulation preview finish loading before closing.")
-            event.ignore()
-            return
+        # The viewer is a separate process. Closing UV3D terminates that child
+        # first; it must never prevent closing the main application.
         self.simulator.shutdown()
         if (self.support_preview_thread is not None
                 and self.support_preview_thread.isRunning()):
