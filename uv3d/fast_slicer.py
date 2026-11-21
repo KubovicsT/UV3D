@@ -19,6 +19,7 @@ from .core import (
     MachineProfile, SliceSettings, load_mesh, prepare_mesh,
     _face_colors, _polygons_from_segments,
 )
+from .job_storage import calculate_job_plan, ensure_disk_space
 
 
 def _contours_from_segments(segments: np.ndarray, tolerance: float = 1e-5):
@@ -95,7 +96,7 @@ def _contour_pixels(segments, minimum, maximum, pixels_per_mm, margin_mm):
 
 
 def slice_fast(filename, output_dir, settings: SliceSettings,
-               on_progress=None, profile=None):
+               on_progress=None, profile=None, on_plan=None):
     """Generate the same offline masks and manifest as the legacy slicer."""
     settings.validate()
     machine = profile or MachineProfile()
@@ -115,13 +116,15 @@ def slice_fast(filename, output_dir, settings: SliceSettings,
             or settings.placement_y_mm + h / ppm > machine.bed_y_mm):
         raise ValueError("Raster placement exceeds the configured 600×900 mm bed.")
     n = math.ceil(height_mm / settings.layer_mm)
-    if n > 2000:
-        raise ValueError("More than 2000 layers; increase layer thickness for this prototype.")
-    if n * w * h > 350_000_000:
-        raise ValueError("Job too large for this prototype (over 350M layer-pixels).")
+    # Total pixel count affects runtime and disk use, not peak raster RAM:
+    # only the active layer is rendered, encoded, then written to disk.
+    plan = calculate_job_plan(w, h, n)
     out = Path(output_dir)
     if out.exists() and any(out.iterdir()):
         raise ValueError("Export folder must be empty, to avoid mixing jobs.")
+    ensure_disk_space(out, plan.pixels_per_layer)
+    if on_plan:
+        on_plan(plan)
     out.mkdir(parents=True, exist_ok=True)
     colors = _face_colors(mesh)
     manifest = {
@@ -136,6 +139,7 @@ def slice_fast(filename, output_dir, settings: SliceSettings,
         "model_bounds_mm": [minimum.tolist(), maximum.tolist()],
         "raster_size_px": [w, h],
         "raster_footprint_mm": [w / ppm, h / ppm],
+        "storage_plan": plan.as_dict(),
         "warnings": warnings + [
             "PrintExp .prt generation and printer API are NOT integrated.",
             "Supports, overhang analysis, true texture mapping and color management are NOT implemented.",
@@ -172,6 +176,7 @@ def slice_fast(filename, output_dir, settings: SliceSettings,
     prev_encoded = None
 
     for idx in range(n):
+        ensure_disk_space(out, plan.pixels_per_layer)
         z = min(minimum[2] + (idx + .5) * settings.layer_mm, maximum[2] - 1e-6)
         next_low = np.searchsorted(low_z, z, side="right")
         if next_low > low_cursor:
