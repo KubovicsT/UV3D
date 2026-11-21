@@ -1,6 +1,6 @@
 # UV3D
 
-**Prototype v0.8 — offline experimental UV slicing and multihead gantry/UV curing preview. No printhead, motor, UV lamp, or printer control is implemented.**
+**Prototype v0.8.2 — offline experimental UV slicing and direction-aware trailing-lamp curing preview. No printhead, motor, UV lamp, or printer control is implemented.**
 
 UV3D targets the Gongzheng H6090EI (three Epson i3200 heads, CMYK/white/varnish), with FlexiPRINT MiniTX GongZheng Edition and Gongzheng PrintExp. It is independent of both vendor applications.
 
@@ -156,6 +156,8 @@ The separate simulation window has a **Gantry setup — heads & UV lamps** tab. 
 - **Direction-aware trailing-lamp UV curing:** Left-to-right printing illuminates **only the lamp trailing on the left**; right-to-left printing illuminates **only the lamp trailing on the right**. The leading lamp stays off, including with multiple lamps installed. If the trailing lamp covers the active printed swath, the simulated ink and UV exposure take place during **the same print scan**, so the model does not wait for a second full curing sweep. If it needs additional X travel to reach the far edge, the gantry follows through with UV on; otherwise it does not move aside. A lamp that does not fit the printed swath uses a post-pass cure sweep of one selected lamp. The 1–5 UV exposure setting counts the inline pass first, then adds only the additional sweeps requested. Gold illumination tracks the selected lamp's physical footprint.
 - **One assembly:** All heads, UV lamps and the connecting carriage beam move together. Their layout affects scan travel, Y-band count, UV movement time, progress and ETA. Movement speed applies to UV-only sweeps, not print speed.
 - **Stored entirely within the app folder:** workspace/machine/gantry.json. Changes update virtual geometry and ETA without re-slicing or changing firmware.
+
+For lamps installed on both sides of the printheads, the trailing lamp is chosen by gantry X direction. If the lamp can illuminate the active band while the carriage prints, the simulated exposure occurs at **Printhead speed** without a separate UV scan. If it must follow through to expose the final edge, only the missing extra distance is moved at **Movement speed**; for other layouts, one post-print curing sweep remains available. This can lower estimated production time, but it does not implement real lamp switching or machine commands.
 
 The initial three-head CMYK/white/varnish layout and two UV lamps are **unmeasured editable examples**. The individual i3200-U1 head-body dimensions are known, but lamp sizes, mounting positions and multi-head spacing must be measured on the actual machine. The simulator shows footprint overlap, **not** verified UV energy, dose, ink curing or printhead safety. Support assignment is only a proposed virtual material channel; no soluble support ink or physical support nozzle has been verified.
 
