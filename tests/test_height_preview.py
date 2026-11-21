@@ -66,4 +66,12 @@ def test_gui_height_and_slider_before_export(tmp_path):
     assert gui.layer_select.value() == 20
     assert gui.viewport.slice_z == pytest.approx((20 - 0.5) * 0.05)
     assert gui.job_data is None
+    # Rendering is part of the feature, not only its data model.
+    gui.viewport.resize(660, 440)
+    gui.viewport.show()
+    app.processEvents()
+    gui.viewport._rebuild_cap()
+    assert gui.viewport._cap_polys, "Watertight box needs a colored slice cap."
+    image = gui.viewport.grab().toImage()
+    assert image.width() > 0 and image.height() > 0
     gui.close()
