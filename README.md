@@ -83,7 +83,11 @@ The production app doesn't rely on system Python. MIT licensed: see LICENSE.
 
 **UV3D does not yet have a verified water-soluble support ink, a dedicated support printhead/channel, or a validated RIP mapping.** The grayscale support PNG is a *fourth conceptual material channel* and must not be sent to the Gongzheng printer as CMYK, white, or varnish. Ordinary white/varnish UV inks are not assumed water-soluble, and using them as support can permanently encase the part.
 
-The support algorithm fills all unsupported XY columns continuously down to the printbed. Unlike the conventional full rectangular support cube, its external footprint follows the outline of the highest model feature above each layer plus the selected casing width. This can save sacrificial volume, but has important caveats:
+The support algorithm fills **all unsupported XY columns continuously down to the printbed**. Under a wide upper ledge, the *entire left and right regions below the ledge* are filled with support, all the way down. There must not be empty gaps below a support shell. Unlike a full rectangular support cube, regions outside the downward-projected shape (plus casing allowance) remain empty.
+
+For each XY pixel, look at every model/casing pixel above the current layer: if **any** of them is present, the current pixel must contain either solid model or support. Mathematically, the occupied support envelope is a cumulative union of all higher cross-sections. This is a solid, vertically connected volume, not a hollow casing.
+
+The exported masks now have an explicit regression test with a wide roof on a narrow stem. It checks that both large undercut regions are solid support to the bed, while the model itself remains solid and unoverlapped by support. This can save sacrificial volume, but has important caveats:
 
 - The entire shape is printed from the bed upward; the casing is a solid column-support envelope rather than hollow lattice support.
 - Support can become trapped inside completely enclosed internal cavities and cannot necessarily be washed away. Inspect the model for inaccessible spaces before attempting physical printing.
