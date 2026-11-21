@@ -36,8 +36,13 @@ def test_bidirectional_lamps_switch_sides_and_cure_during_printing(passes):
     prints = [(i,s) for i,s in enumerate(plan.segments)
               if s.kind == "print" and s.layer_index == 0]
     assert len(prints) == passes
-    assert not any(s.kind in ("cure","uv_travel","uv_followthrough")
+    assert not any(s.kind in ("cure","uv_travel")
                    for s in plan.segments)
+    # Every trailing UV footprint must clear the FAR edge, so each pass has
+    # a continuous follow-through after ink stops being deposited.
+    follows = [s for s in plan.segments
+               if s.kind == "uv_followthrough" and s.layer_index == 0]
+    assert len(follows) == passes
     for n, (i,s) in enumerate(prints):
         assert s.printing and s.curing
         assert s.lamp_index == n % 2
@@ -49,6 +54,21 @@ def test_bidirectional_lamps_switch_sides_and_cure_during_printing(passes):
         footprints = uv_footprints(frame, cfg, 0, 0, 20, 30)
         assert len(footprints) == 1
         assert footprints[0][0] == n % 2
+        follow = plan.segments[i + 1]
+        assert follow.kind == "uv_followthrough"
+        assert follow.curing and not follow.printing
+        assert follow.lamp_index == s.lamp_index
+        assert follow.start_xyz == pytest.approx(s.end_xyz)
+        assert follow.speed_mm_s == plan.print_speed_mm_s
+        lamp = cfg.lamps[s.lamp_index]
+        if n % 2 == 0:
+            # Entire illuminated rectangle must clear the far side,
+            # not merely its leading edge reach that side.
+            assert (follow.end_xyz[0] + lamp.offset_x_mm -
+                    lamp.width_mm / 2) >= 20 - 1e-8
+        else:
+            assert (follow.end_xyz[0] + lamp.offset_x_mm +
+                    lamp.width_mm / 2) <= 0 + 1e-8
     assert all(a.end_xyz == pytest.approx(b.start_xyz)
                for a,b in zip(plan.segments,plan.segments[1:]))
 
@@ -100,12 +120,14 @@ def test_distant_trailing_lamp_only_extends_curing_to_far_raster_edge():
         assert follow.lamp_index==printing.lamp_index
         assert follow.start_xyz==pytest.approx(printing.end_xyz)
         assert follow.duration_s>0
-        assert follow.speed_mm_s==plan.move_speed_mm_s
-        # Check near the END of the follow-through: until the lamp reaches
-        # the raster, the early part of a distant trailing move may be dark.
-        t=plan._segment_end_s[i+1]-min(1e-7,follow.duration_s*.001)
-        final=plan.get_frame(t/plan.total_seconds)
-        assert len(uv_footprints(final,cfg,0,0,20,30))==1
+        assert follow.speed_mm_s==plan.print_speed_mm_s
+        lamp = cfg.lamps[follow.lamp_index]
+        if printing.end_xyz[0] > printing.start_xyz[0]:
+            assert (follow.end_xyz[0] + lamp.offset_x_mm -
+                    lamp.width_mm/2) == pytest.approx(20)
+        else:
+            assert (follow.end_xyz[0] + lamp.offset_x_mm +
+                    lamp.width_mm/2) == pytest.approx(0)
     assert all(a.end_xyz==pytest.approx(b.start_xyz)
                for a,b in zip(plan.segments,plan.segments[1:]))
 
@@ -147,7 +169,7 @@ def test_default_three_head_two_lamp_gantry_uses_only_trailing_side():
                for a,b in zip(plan.segments,plan.segments[1:]))
 
 
-def test_lamps_physically_larger_than_printhead_use_short_followthrough_not_full_cure_sweep():
+def test_lamps_wider_than_printhead_fully_clear_raster_not_only_front_edge():
     config = GantryConfig(
         heads=[HeadConfig("white","white")],
         lamps=[LampConfig("large left",-80,0,120,90),
@@ -160,11 +182,12 @@ def test_lamps_physically_larger_than_printhead_use_short_followthrough_not_full
     assert not any(s.kind=="cure" for s in plan.segments)
     follow=[s for s in plan.segments if s.kind=="uv_followthrough"]
     assert len(follow)==plan.count*2
-    # The light is 120 mm wide, larger than the 69.1-mm head body.
-    # Each print endpoint is only 10 mm short of fully curing a 20-mm
-    # raster, NOT a full 20-mm UV scan or a carriage jump to the side.
-    assert all(abs(s.end_xyz[0]-s.start_xyz[0])==pytest.approx(10)
+    # The lamp is 120 mm wide. The previous calculation stopped as soon
+    # as its FRONT reached X=20 (only 10 mm extra). The LAST point must
+    # instead receive the entire 120-mm footprint: 130 mm follow-through.
+    assert all(abs(s.end_xyz[0]-s.start_xyz[0])==pytest.approx(130)
                for s in follow)
+    assert all(s.speed_mm_s == plan.print_speed_mm_s for s in follow)
 
 
 
