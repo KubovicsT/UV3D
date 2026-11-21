@@ -617,9 +617,9 @@ class SimulationWidget(QWidget):
         if self.plan is None:
             return
         normalized = self.elapsed / self.plan.total_seconds
-        self.plan.set_print_speed(self.print_speed.value())
-        self.plan.set_move_speed(self.move_speed.value())
-        self.plan.set_passes(self.print_passes.value())
+        self.plan.configure(
+            self.print_speed.value(), self.move_speed.value(),
+            self.print_passes.value())
         self.elapsed = normalized * self.plan.total_seconds
         self._last_clock = time.monotonic()
         self._update_frame()
