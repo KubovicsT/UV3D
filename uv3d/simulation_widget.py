@@ -17,7 +17,7 @@ import numpy as np
 from PySide6.QtCore import QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import (
-    QCheckBox, QColorDialog, QDoubleSpinBox, QFileDialog, QGroupBox,
+    QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog, QGroupBox,
     QHBoxLayout, QLabel, QMessageBox, QPushButton, QSlider, QSpinBox,
     QVBoxLayout, QWidget,
 )
@@ -166,6 +166,8 @@ class SimulationWidget(QWidget):
         self._close_when_idle = False
         self._support_color = QColor("#a86edc")
         self._model_color = QColor("#c8c4b5")
+        self._current_model_color = QColor("#ffad2e")
+        self._current_support_color = QColor("#1aebcf")
 
         layout = QVBoxLayout(self)
         warning = QLabel(
@@ -249,6 +251,18 @@ class SimulationWidget(QWidget):
             "6 is an illustrative default; this is not read from the printer RIP.")
         self.print_passes.valueChanged.connect(self.speed_changed)
         speeds_layout.addWidget(self.print_passes)
+        speeds_layout.addWidget(QLabel("Printing direction"))
+        self.print_mode = QComboBox()
+        self.print_mode.addItem("Bidirectional — prints in both directions",
+                                "bidirectional")
+        self.print_mode.addItem("One direction — prints left to right",
+                                "unidirectional")
+        self.print_mode.setToolTip(
+            "Bidirectional prints on alternating left/right scans. "
+            "One direction prints only left-to-right; every return is non-printing "
+            "travel at Movement speed.")
+        self.print_mode.currentIndexChanged.connect(self.speed_changed)
+        speeds_layout.addWidget(self.print_mode)
         speeds_layout.addWidget(QLabel("Replay speed (× virtual time)"))
         self.replay_speed = QDoubleSpinBox()
         self.replay_speed.setRange(.1,1000)
@@ -278,6 +292,27 @@ class SimulationWidget(QWidget):
             "STL has no standard surface texture. For colored OBJ/PLY/GLB files, "
             "the source vertex/face colors are preserved instead.")
         support_layout.addWidget(self.model_color_button)
+        support_layout.addWidget(QLabel("Current printing layer — highlight colors"))
+        self.current_model_button = QPushButton("Printing model: orange")
+        self.current_model_button.setToolTip(
+            "Color only the actively printed model layer; completed model keeps "
+            "its original appearance.")
+        self.current_model_button.clicked.connect(self.pick_current_model_color)
+        support_layout.addWidget(self.current_model_button)
+        self.current_support_button = QPushButton("Printing support: cyan")
+        self.current_support_button.setToolTip(
+            "Color only the actively printed support layer. Completed support "
+            "keeps the normal support color and opacity.")
+        self.current_support_button.clicked.connect(self.pick_current_support_color)
+        support_layout.addWidget(self.current_support_button)
+        support_layout.addWidget(QLabel("Printhead opacity"))
+        self.head_opacity = QSlider(Qt.Horizontal)
+        self.head_opacity.setRange(0, 100)
+        self.head_opacity.setValue(65)
+        self.head_opacity.valueChanged.connect(self.head_opacity_changed)
+        support_layout.addWidget(self.head_opacity)
+        self.head_opacity_readout = QLabel("65%")
+        support_layout.addWidget(self.head_opacity_readout)
         self.future_checkbox = QCheckBox("Show unprinted model silhouette")
         self.future_checkbox.setChecked(True)
         self.future_checkbox.toggled.connect(self.show_future_changed)
@@ -379,7 +414,8 @@ class SimulationWidget(QWidget):
             plan = PrintSimulation(
                 manifest, move_speed_mm_s=self.move_speed.value(),
                 print_speed_mm_s=self.print_speed.value(),
-                passes=self.print_passes.value())
+                passes=self.print_passes.value(),
+                print_mode=self.print_mode.currentData())
         except Exception as exc:
             self.detail.setText(f"Cannot open simulation job: {exc}")
             return
@@ -435,6 +471,9 @@ class SimulationWidget(QWidget):
             self.viewport.set_simulation_scene(mesh,payload,self.manifest)
             self.viewport.set_support_surface(surface.triangles)
             self._scene_ready = True
+            self.viewport.set_simulation_passes(self.plan.passes)
+            self.viewport.set_head_opacity(self.head_opacity.value() / 100)
+            self._sync_current_layer_colors()
             self.viewport.set_support_tint(
                 self._support_color.getRgb()[:3],self.support_opacity.value()/100)
             # Use a fallback color for STL, whose standard format has no
@@ -541,7 +580,8 @@ class SimulationWidget(QWidget):
             f"{frame.motion_kind.upper()} · "
             f"{frame.layer_progress*100:.1f}% through layer. "
             f"Head X {hx:.1f}, Y {hy:.1f}, Z {hz:.2f} mm · "
-            f"{frame.rows_per_layer} swath bands × {self.plan.passes} passes. "
+            f"{frame.rows_per_layer} swath bands × {self.plan.passes} passes "
+            f"({self.print_mode.currentText().split(' — ')[0]}). "
             f"Based on one i3200-U1 (69.1 × 59.5 × 35.6 mm); "
             "3-head arrangement, real acceleration/UV curing not calibrated.")
         if update_viewport and self.viewport is not None and self._scene_ready:
@@ -619,7 +659,9 @@ class SimulationWidget(QWidget):
         normalized = self.elapsed / self.plan.total_seconds
         self.plan.configure(
             self.print_speed.value(), self.move_speed.value(),
-            self.print_passes.value())
+            self.print_passes.value(), print_mode=self.print_mode.currentData())
+        if self.viewport is not None and self._scene_ready:
+            self.viewport.set_simulation_passes(self.plan.passes)
         self.elapsed = normalized * self.plan.total_seconds
         self._last_clock = time.monotonic()
         self._update_frame()
@@ -684,6 +726,33 @@ class SimulationWidget(QWidget):
         self.opacity_readout.setText(f"{value}%")
         if self.viewport is not None:
             self.viewport.set_support_tint(self._support_color.getRgb()[:3],value/100)
+
+    def head_opacity_changed(self, value):
+        self.head_opacity_readout.setText(f"{value}%")
+        if self.viewport is not None:
+            self.viewport.set_head_opacity(value / 100)
+
+    def _sync_current_layer_colors(self):
+        if self.viewport is not None:
+            self.viewport.set_current_layer_colors(
+                self._current_model_color.getRgb()[:3],
+                self._current_support_color.getRgb()[:3])
+
+    def pick_current_model_color(self):
+        picked = QColorDialog.getColor(
+            self._current_model_color, self, "Current printing model color")
+        if picked.isValid():
+            self._current_model_color = picked
+            self.current_model_button.setText("Printing model: " + picked.name())
+            self._sync_current_layer_colors()
+
+    def pick_current_support_color(self):
+        picked = QColorDialog.getColor(
+            self._current_support_color, self, "Current printing support color")
+        if picked.isValid():
+            self._current_support_color = picked
+            self.current_support_button.setText("Printing support: " + picked.name())
+            self._sync_current_layer_colors()
 
     def pick_model_color(self):
         picked = QColorDialog.getColor(self._model_color,self,"Fallback model color (uncolored STL)")
