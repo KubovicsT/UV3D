@@ -47,6 +47,50 @@ def build_preview_geometry(mesh: trimesh.Trimesh, max_faces: int = 3000):
     if len(faces) <= max_faces:
         return vertices[faces], np.asarray(mesh.face_normals), colors
 
+    # Native quadric decimation avoids several expensive Python/Numpy voxel
+    # clustering passes on million-face models. It is ONLY for visualization.
+    try:
+        import fast_simplification
+        fraction_removed = 1.0 - max_faces / len(faces)
+        vertices_out, faces_out, collapses = fast_simplification.simplify(
+            vertices, faces, fraction_removed, return_collapses=True)
+        if 0 < len(faces_out) <= max_faces and len(vertices_out):
+            triangles = np.asarray(vertices_out[faces_out], dtype=float)
+            cross = np.cross(triangles[:, 1] - triangles[:, 0],
+                             triangles[:, 2] - triangles[:, 0])
+            cross /= np.maximum(np.linalg.norm(cross, axis=1)[:, None], 1e-12)
+            if np.all(colors == colors[0]):
+                rgb = np.broadcast_to(colors[0], (len(faces_out), 3)).copy()
+            else:
+                # Map original vertex colors to simplified vertices by replaying
+                # the recorded collapses; never infer colors from random faces.
+                _, _, mapping = fast_simplification.replay_simplification(
+                    vertices, faces, collapses)
+                mapping = np.asarray(mapping, dtype=np.int64)
+                if len(mapping) != len(vertices) or (mapping < 0).any() or (mapping >= len(vertices_out)).any():
+                    raise ValueError("Invalid simplified vertex correspondence")
+                original_vertex_colors = np.zeros((len(vertices), 3), dtype=float)
+                flattened = faces.ravel()
+                counts = np.maximum(np.bincount(flattened, minlength=len(vertices)), 1)
+                for channel in range(3):
+                    sums = np.bincount(flattened,
+                                       weights=np.repeat(colors[:, channel], 3),
+                                       minlength=len(vertices))
+                    original_vertex_colors[:, channel] = sums / counts
+                weights = np.maximum(np.bincount(mapping, minlength=len(vertices_out)), 1)
+                reduced_vertex_colors = np.empty((len(vertices_out), 3), dtype=float)
+                for channel in range(3):
+                    sums = np.bincount(mapping, weights=original_vertex_colors[:, channel],
+                                       minlength=len(vertices_out))
+                    reduced_vertex_colors[:, channel] = sums / weights
+                rgb = np.clip(np.mean(reduced_vertex_colors[faces_out], axis=1),
+                              0, 255).astype(np.uint8)
+            return triangles, cross, rgb
+    except (ImportError, RuntimeError, ValueError, TypeError, IndexError) as exc:
+        # Keep an independent Python path in case a platform cannot run the
+        # native accelerator or a malformed mesh cannot be simplified.
+        pass
+
     extent = float(np.max(mesh.extents))
     bounds_min = mesh.bounds[0]
 
