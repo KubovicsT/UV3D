@@ -7,7 +7,7 @@ UV3D targets the Gongzheng H6090EI (three Epson i3200 heads, CMYK/white/varnish)
 ## Features
 
 - Windows desktop GUI to import STL, OBJ, GLB, GLTF, 3MF and PLY triangle meshes.
-- **Responsive background imports:** load meshes and simplify preview geometry without blocking the Windows UI. A status message and indeterminate progress bar show which stage is running, and the log records timings.
+- **Responsive background imports:** load meshes and simplify preview geometry without blocking the Windows UI. A status message and indeterminate progress bar show which stage is running, and the log records timings. The detailed-mesh preview uses the MIT-licensed `fast-simplification` native library where possible, with a Python fallback; its wheel is installed into the existing UV3D `runtime/` directory, not system-wide.
 - Interactive orbitable **3D build viewport**: left-drag orbit, right/middle-drag pan, wheel zoom, Reset view.
 - **Set model height in millimeters**: the mesh is scaled uniformly in X/Y/Z and the exact same transformed geometry is used for both preview and exported slices.
 - Slicer-style **vertical layer slider**, synchronized numeric layer selector, translucent full-model silhouette, visible solid portion below the slice and amber highlighted cross-section **before export**.
