@@ -63,7 +63,9 @@ def load_mesh(filename: str | Path) -> tuple[trimesh.Trimesh, list[str]]:
     if not meshes:
         raise ValueError("File contains no printable triangle meshes.")
     has_texture = any(getattr(m.visual, "kind", "") == "texture" for m in meshes)
-    mesh = trimesh.util.concatenate(meshes)
+    # Avoid rebuilding/copying the entire vertex+face array when the file has
+    # just one mesh (the common case for STL and many OBJ/PLY files).
+    mesh = meshes[0] if len(meshes) == 1 else trimesh.util.concatenate(meshes)
     if not np.isfinite(mesh.vertices).all():
         raise ValueError("Model contains non-finite coordinates.")
     warnings = []
