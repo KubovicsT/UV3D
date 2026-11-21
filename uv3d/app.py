@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import weakref
 from datetime import datetime
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Qt
@@ -233,10 +234,16 @@ class MainWindow(QMainWindow):
         right_layout.addLayout(view_row, stretch=6)
 
         camera_buttons = QHBoxLayout()
+        viewport_ref = weakref.ref(self.viewport)
         for name in ('Isometric', 'Top', 'Front', 'Right', 'Fit model'):
             button = QPushButton(name)
-            button.clicked.connect(lambda checked=False, view=name:
-                                   self.viewport.set_view_preset(view))
+            # Avoid a signal -> lambda -> MainWindow reference cycle. That
+            # could keep native Qt widgets alive after QApplication exits.
+            def go_to_view(checked=False, view=name, ref=viewport_ref):
+                target = ref()
+                if target is not None:
+                    target.set_view_preset(view)
+            button.clicked.connect(go_to_view)
             camera_buttons.addWidget(button)
         camera_buttons.addStretch(1)
         right_layout.addLayout(camera_buttons)
