@@ -1,0 +1,142 @@
+"""Conformal, self-supporting sacrificial material masks for offline UV3D jobs.
+
+We generate solid model masks first, then traverse the stack from TOP to BED:
+    envelope[z] = envelope[z+1] OR dilate(model[z], casing_radius)
+    support[z] = envelope[z] AND NOT model[z]
+
+This strictly enforces a material column underneath every future occupied
+pixel, while creating a shape-following staircase rather than a full XYZ cube.
+
+The output is a *fourth, unmapped material channel*, not white/varnish ink.
+No assumption is made about water solubility, curing, accessibility or actual
+printhead compatibility. Support sealed into an inaccessible cavity may become
+impossible to remove. It is never sent directly to the printer.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+from .job_storage import ensure_disk_space
+
+
+def effective_raster_margin(settings) -> float:
+    """Give the chosen external casing room in the image without clipping it.
+
+    Keep old behavior when support is disabled. The new margin is reported in
+    the manifest; it is shared by all exported channels.
+    """
+    margin = float(settings.margin_mm)
+    if settings.support_enabled:
+        # Two output pixels between nominal casing and image border.
+        margin = max(margin, float(settings.support_casing_mm) + 2 * 25.4 / settings.dpi)
+    return margin
+
+
+def radius_pixels(casing_mm: float, dpi: int) -> int:
+    return max(0, int(round(float(casing_mm) * dpi / 25.4)))
+
+
+def make_casing_kernel(radius: int):
+    if radius <= 0:
+        return None
+    diameter = radius * 2 + 1
+    return cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (diameter, diameter))
+
+
+def support_layer(part: np.ndarray, envelope_above: np.ndarray, kernel=None):
+    """One upper-to-lower step. Return (support, cumulative_envelope).
+
+    Both inputs are uint8 masks, with zero=empty and nonzero=occupied.
+    Part/support masks have NO overlapping pixels, including shell boundaries.
+    The envelope is monotonically larger going toward the build plate.
+    """
+    if part.ndim != 2 or part.dtype != np.uint8:
+        raise ValueError("Part raster must be a grayscale uint8 image.")
+    if part.shape != envelope_above.shape or envelope_above.dtype != np.uint8:
+        raise ValueError("Model and support envelope shapes must match.")
+    if kernel is None:
+        buffered = part
+    else:
+        buffered = cv2.dilate(part, kernel, iterations=1)
+    envelope = cv2.bitwise_or(envelope_above, buffered)
+    support = cv2.bitwise_and(envelope, cv2.bitwise_not(part))
+    return support, envelope
+
+
+def generate_support_masks(output_dir: str | Path, layer_entries: list[dict],
+                           body_material: str, casing_mm: float, dpi: int,
+                           layer_mm: float, on_progress=None) -> dict:
+    """Emit numbered 8-bit support PNGs using O(one-layer) raster memory.
+
+    Reads the solid-model channel saved by the slicer and writes support PNGs in
+    descending Z order. The manifest is written only after this returns.
+    Completed part/support PNGs remain available if the disk runs out.
+    """
+    if body_material not in ("white", "varnish"):
+        raise ValueError("Unsupported solid-model source material.")
+    if casing_mm < 0 or dpi <= 0 or layer_mm <= 0:
+        raise ValueError("Invalid support construction parameters.")
+    out = Path(output_dir)
+    if not layer_entries:
+        return {
+            "support_pixels": 0, "solid_model_pixels": 0,
+            "support_volume_mm3": 0.0, "solid_model_volume_mm3": 0.0,
+            "cube_support_volume_mm3": 0.0, "saving_vs_cube_percent": 0.0,
+        }
+    first_path = out / layer_entries[-1][body_material]
+    first = cv2.imread(str(first_path), cv2.IMREAD_GRAYSCALE)
+    if first is None:
+        raise RuntimeError(f"Unable to read solid-model mask: {first_path}")
+    height, width = first.shape
+    envelope = np.zeros((height, width), dtype=np.uint8)
+    kernel = make_casing_kernel(radius_pixels(casing_mm, dpi))
+    mask_options = [cv2.IMWRITE_PNG_COMPRESSION, 1]
+    support_pixels = 0
+    model_pixels = 0
+    total = len(layer_entries)
+
+    for completed, layer in enumerate(reversed(layer_entries), start=1):
+        ensure_disk_space(out, width * height)
+        src = out / layer[body_material]
+        part = first if completed == 1 else cv2.imread(
+            str(src), cv2.IMREAD_GRAYSCALE)
+        if part is None or part.shape != (height, width):
+            raise RuntimeError(f"Missing or inconsistent solid-model mask: {src}")
+        support, envelope = support_layer(part, envelope, kernel)
+        layer["support"] = f"{int(layer['index']):05d}_support.png"
+        dest = out / layer["support"]
+        if not cv2.imwrite(str(dest), support, mask_options):
+            raise OSError(f"Failed to write support image: {dest}")
+        support_pixels += cv2.countNonZero(support)
+        model_pixels += cv2.countNonZero(part)
+        layer["contains_support"] = bool(np.any(support))
+        if on_progress:
+            on_progress(completed, total)
+
+    # The bottom envelope is the XY footprint of *all* future occupied columns.
+    # A traditional fully filled rectangular support block would occupy the
+    # rectangular bounding box of this footprint, at every build height.
+    ys, xs = np.nonzero(envelope)
+    bbox_area_px = ((int(xs.max()) - int(xs.min()) + 1) *
+                    (int(ys.max()) - int(ys.min()) + 1)) if len(xs) else 0
+    cube_support_px = max(0, bbox_area_px * total - model_pixels)
+    voxel_volume = (25.4 / dpi) ** 2 * layer_mm
+    saving = (100 * (1 - support_pixels / cube_support_px)
+              if cube_support_px > 0 else 0.0)
+    return {
+        "support_pixels": int(support_pixels),
+        "solid_model_pixels": int(model_pixels),
+        "support_volume_mm3": round(support_pixels * voxel_volume, 3),
+        "solid_model_volume_mm3": round(model_pixels * voxel_volume, 3),
+        "cube_support_volume_mm3": round(cube_support_px * voxel_volume, 3),
+        "saving_vs_cube_percent": round(max(0.0, saving), 2),
+        "comparison": (
+            "Comparison uses a solid rectangular XY bounding box around the "
+            "support footprint for the full stack height; model pixels are "
+            "excluded from both support totals. Pixel-volume approximation only."
+        ),
+    }
