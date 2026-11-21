@@ -28,6 +28,7 @@ class SliceSettings:
     body_material: str = "white"
     support_enabled: bool = True
     support_casing_mm: float = 0.6
+    support_top_cap_mm: float = 0.0
     placement_x_mm: float = 10.0
     placement_y_mm: float = 10.0
 
@@ -44,6 +45,8 @@ class SliceSettings:
             raise ValueError("Support enabled must be true or false.")
         if not np.isfinite(self.support_casing_mm) or not (0 <= self.support_casing_mm <= 5):
             raise ValueError("Support casing must be between 0 and 5 mm.")
+        if not np.isfinite(self.support_top_cap_mm) or not (0 <= self.support_top_cap_mm <= 5):
+            raise ValueError("Support top-cap must be between 0 and 5 mm.")
         if self.body_material not in ("white", "varnish"):
             raise ValueError("Body material must be white or varnish.")
         if self.placement_x_mm < 0 or self.placement_y_mm < 0:
@@ -212,7 +215,9 @@ def _slice_model_legacy(filename: str | Path, output_dir: str | Path, settings: 
     if settings.placement_x_mm + (w / pixel_per_mm) > machine.bed_x_mm or settings.placement_y_mm + (h / pixel_per_mm) > machine.bed_y_mm:
         raise ValueError("Raster placement exceeds the configured 600×900 mm bed.")
     n = math.ceil(model_height / settings.layer_mm)
-    plan = calculate_job_plan(w, h, n, support_enabled=settings.support_enabled)
+    cap_layers = (math.ceil(settings.support_top_cap_mm / settings.layer_mm - 1e-9)
+                  if settings.support_enabled and settings.support_top_cap_mm else 0)
+    plan = calculate_job_plan(w, h, n + cap_layers, support_enabled=settings.support_enabled)
 
     def pxy(x: float, y: float) -> tuple[int, int]:
         return (round((x - minimum[0] + raster_margin) * pixel_per_mm),
@@ -242,6 +247,7 @@ def _slice_model_legacy(filename: str | Path, output_dir: str | Path, settings: 
         "effective_raster_margin_mm": raster_margin,
         "solid_volume": True,
         "support": {"enabled": settings.support_enabled, "casing_mm": settings.support_casing_mm,
+                    "top_cap_mm": settings.support_top_cap_mm,
                     "material": "UNASSIGNED - requires separately validated removable support ink"},
         "storage_plan": plan.as_dict(),
         "warnings": warnings + [
@@ -255,7 +261,7 @@ def _slice_model_legacy(filename: str | Path, output_dir: str | Path, settings: 
         "layers": []
     }
     stroke_width = max(1, round(settings.shell_mm * pixel_per_mm))
-    progress_total = n * (2 if settings.support_enabled else 1)
+    progress_total = n * (2 if settings.support_enabled else 1) + cap_layers
     if on_stage:
         on_stage("Generating solid model volume masks and exterior color boundaries")
     for index in range(n):
@@ -299,7 +305,7 @@ def _slice_model_legacy(filename: str | Path, output_dir: str | Path, settings: 
         manifest["support"]["statistics"] = generate_support_masks(
             out, manifest["layers"], settings.body_material,
             settings.support_casing_mm, settings.dpi, settings.layer_mm,
-            on_progress=support_progress)
+            on_progress=support_progress, top_cap_mm=settings.support_top_cap_mm)
     path = out / "job.json"
     path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return path
