@@ -65,11 +65,18 @@ void main() {
 
 
 def make_head_cuboid(center_x: float, center_y: float, bottom_z: float,
-                     model_width: float, model_depth: float):
-    """Return a visually scaled cuboid [36,3] and per-face colors."""
-    width = max(4.0, min(18.0, model_width * .21))
-    depth = max(4.0, min(12.0, model_depth * .15))
-    tall = max(2.0, min(6.0, width * .38))
+                     model_width: float = 0.0, model_depth: float = 0.0,
+                     head_spec=None):
+    """Render the PHYSICAL Epson i3200-U1 body, not a model-scaled cube.
+
+    Width 69.1, depth 59.5, height 35.6 mm. The nozzle swath is a
+    separate 33.8-mm effective print width, not the body depth.
+    """
+    from .simulation_engine import PrintHeadSpec
+    spec = head_spec or PrintHeadSpec()
+    width = spec.body_x_mm
+    depth = spec.body_y_mm
+    tall = spec.body_z_mm
     x0, x1 = center_x - width/2, center_x + width/2
     y0, y1 = center_y - depth/2, center_y + depth/2
     z0, z1 = bottom_z, bottom_z + tall
@@ -311,8 +318,7 @@ class SimulationViewport(GpuModelViewport):
         if self.frame is None or self.mesh is None:
             return
         x, y, z = self.frame.head_position_mm
-        dims = self.mesh.extents
-        head = make_head_cuboid(x,y,z,float(dims[0]),float(dims[1]))
+        head = make_head_cuboid(x,y,z)
         self._setup_simple_vao(self._head_vao, self._head_vbo)
         GL.glBufferData(GL.GL_ARRAY_BUFFER, head.nbytes,
                         head.tobytes(), GL.GL_STREAM_DRAW)
