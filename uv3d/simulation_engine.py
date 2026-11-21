@@ -104,8 +104,10 @@ class PrintSimulation:
         else:
             y = self.max_y - (row + .5) * self.row_step
         height = float(self.layers[layer]["target_stack_height_mm"])
-        completed_height = (0.0 if layer == 0 else
-                            float(self.layers[layer - 1]["target_stack_height_mm"]))
+        completed_height = (
+            height if complete else
+            (0.0 if layer == 0 else
+             float(self.layers[layer - 1]["target_stack_height_mm"])))
         return SimulationFrame(
             layer_index=layer, layer_count=self.count,
             layer_progress=progress, completed_height_mm=completed_height,
