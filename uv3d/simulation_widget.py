@@ -14,7 +14,7 @@ import weakref
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QDoubleSpinBox, QFileDialog, QGroupBox,
@@ -92,7 +92,7 @@ def discover_model_source(job_path: Path, manifest: dict, root: Path) -> Path | 
     return None
 
 
-class SimulationAssetsWorker(QObject):
+class SimulationAssetsThread(QThread):
     ready = Signal(str, object, object, object)
     failed = Signal(str)
 
@@ -123,7 +123,7 @@ class SimulationAssetsWorker(QObject):
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
-class LayerTextureWorker(QObject):
+class LayerTextureThread(QThread):
     ready = Signal(str, int, object)
     failed = Signal(str, int, str)
 
@@ -158,8 +158,8 @@ class SimulationWidget(QWidget):
         self._last_clock = None
         self._loaded_texture_layer = -1
         self._wanted_texture_layer = -1
-        self._asset_thread = self._asset_worker = None
-        self._texture_thread = self._texture_worker = None
+        self._asset_thread = None
+        self._texture_thread = None
         self._deferred_job = None
         self._pending_model = None
         self._scene_ready = False
@@ -393,22 +393,19 @@ class SimulationWidget(QWidget):
             self._pending_model = (source_mesh,gpu_geometry)
         else:
             self._pending_model = (None,None)
-        thread = QThread(self)
-        worker = SimulationAssetsWorker(
-            job_path,manifest,self.root,*self._pending_model)
-        self._asset_thread,self._asset_worker = thread,worker
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.ready.connect(self._assets_ready)
-        worker.failed.connect(self._assets_failed)
-        worker.ready.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._asset_thread_finished)
+        # QThread objects live on the GUI thread; only their run() methods
+        # execute in worker threads. This avoids moving/deleting timer-owning
+        # QObject workers across threads on Windows.
+        thread = SimulationAssetsThread(
+            job_path, manifest, self.root, *self._pending_model)
+        self._asset_thread = thread
+        thread.ready.connect(self._assets_ready, Qt.QueuedConnection)
+        thread.failed.connect(self._assets_failed, Qt.QueuedConnection)
+        thread.finished.connect(self._asset_thread_finished, Qt.QueuedConnection)
         thread.start()
         self._update_frame()
 
+    @Slot(str, object, object, object)
     def _assets_ready(self, job_path, mesh, payload, surface):
         if self.job_path is None or str(self.job_path) != job_path:
             return
@@ -431,13 +428,16 @@ class SimulationWidget(QWidget):
         self._update_frame()
         self._request_texture(self.plan.get_frame(0).layer_index)
 
+    @Slot(str)
     def _assets_failed(self, problem):
         self.detail.setText("3D preview failed: " + problem)
         # Timeline still works; a missing model cannot silently become a
         # different colored object.
 
+    @Slot()
     def _asset_thread_finished(self):
-        self._asset_thread = self._asset_worker = None
+        self._asset_thread.deleteLater()
+        self._asset_thread = None
         if self._close_when_idle:
             QTimer.singleShot(0, self.close)
             return
@@ -465,20 +465,14 @@ class SimulationWidget(QWidget):
         index = self._wanted_texture_layer
         if index < 0 or index == self._loaded_texture_layer:
             return
-        thread = QThread(self)
-        worker = LayerTextureWorker(self.job_path,index)
-        self._texture_thread,self._texture_worker = thread,worker
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.ready.connect(self._texture_ready)
-        worker.failed.connect(self._texture_failed)
-        worker.ready.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._texture_thread_finished)
+        thread = LayerTextureThread(self.job_path, index)
+        self._texture_thread = thread
+        thread.ready.connect(self._texture_ready, Qt.QueuedConnection)
+        thread.failed.connect(self._texture_failed, Qt.QueuedConnection)
+        thread.finished.connect(self._texture_thread_finished, Qt.QueuedConnection)
         thread.start()
 
+    @Slot(str, int, object)
     def _texture_ready(self,job_path,index,arrays):
         if (self.viewport is None or self.plan is None or
                 self.job_path is None or str(self.job_path) != job_path):
@@ -489,12 +483,15 @@ class SimulationWidget(QWidget):
             self._log_simulation_checkpoint("texture-upload-request")
             self.viewport.set_layer_bitmaps(index,*arrays)
 
+    @Slot(str, int, str)
     def _texture_failed(self,job_path,index,problem):
         if self.job_path is not None and str(self.job_path) == job_path:
             self.detail.setText(f"Layer {index+1:,} preview error: {problem}")
 
+    @Slot()
     def _texture_thread_finished(self):
-        self._texture_thread = self._texture_worker = None
+        self._texture_thread.deleteLater()
+        self._texture_thread = None
         if self._close_when_idle:
             QTimer.singleShot(0, self.close)
             return
