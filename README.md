@@ -136,6 +136,12 @@ A filled 3D sacrificial-support surface is generated from a **sampled/downscaled
 
 This is a conceptual layer-by-layer animation, **not** a Hoson/PrintExp toolpath, a verified Epson printhead scan pattern, a genuine print-time estimate or machine control. Simulated layer-change delay, scan pitch and head clearance are display assumptions. Do not use simulated dimensions or movement as a safety setting.
 
+### Qt timer/thread crash fix (0.6.3)
+
+A Windows crash log from 2026-11-21 reported `QBasicTimer::stop: Failed. Possibly trying to stop from a different thread` twice. This is a warning about Qt object/timer ownership, not itself a native stack trace or proof that the graphics driver failed. UV3D no longer moves the simulation asset/PNG `QObject` workers between threads and relies on their cross-thread deletion. Instead each background operation runs as a `QThread` subclass, with results delivered to main-window slots via explicit queued signals; widget timers remain owned and controlled by the GUI thread. A regression test checks repeated layer-image worker launches, signal delivery on the GUI thread and the absence of Qt timer-affinity warnings.
+
+The isolated player now also captures all Qt warnings into `workspace/logs/uv3d-simulation-native.log`, with a timestamp and thread ID, in addition to the existing `uv3d-simulation-child.log`. If the player still terminates, share both logs and `uv3d-simulation-last-seek.log`; the process exit code displayed by the parent is also valuable.
+
 ### Simulation crash isolation and diagnostics
 
 The 3D player runs with UV3D's **existing folder-local Python** (`runtime/python/python.exe` on Windows), in a separate operating-system process. The main app remains open even if native OpenGL, Qt or a display-driver fault terminates the player. The main simulation tab reports the exact exit code, including hexadecimal Windows codes such as `0xC0000005` for an access violation. Click **Open 3D simulation** to restart it without re-exporting masks.
