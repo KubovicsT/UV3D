@@ -95,6 +95,8 @@ For any mask-generation failure, UV3D remains open and displays a dialog instead
 
 The file records the job, processing mode and most recent completed layer, plus Python tracebacks or a fatal-error thread dump when available. A native Windows termination or out-of-memory kill may leave only the last successful layer and an exit code; no error-reporting mechanism can guarantee a stack trace for every system crash.
 
+Unexpected exceptions or native faults in the main **3D viewer/Qt process** are logged separately (when possible) to `workspace/logs/uv3d-gui-crash.log`. If UV3D itself closes, share that file along with the latest layer-job log.
+
 If a particular model fails with accelerated slicing, check **Compatibility slicing**, retry, and share the diagnostic log if the failure persists. Jobs are never sent to printer hardware. The separate worker is intended to isolate slicer faults, not fix every possible source of bad geometry or memory exhaustion.
 
 ## Next milestones
