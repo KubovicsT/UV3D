@@ -58,8 +58,9 @@ def main(argv=None):
     _LOG_HANDLE.flush()
 
     from PySide6.QtCore import Qt, QTimer, qInstallMessageHandler
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QTabWidget
     from .simulation_widget import SimulationWidget
+    from .gantry_setup_widget import GantrySetupWidget
 
     # Qt warnings (especially QBasicTimer cross-thread and QObject ownership
     # diagnostics) are native-side signals: they otherwise disappear when the
@@ -85,11 +86,17 @@ def main(argv=None):
     previous_handler = qInstallMessageHandler(qt_message_handler)
     app = QApplication(sys.argv[:1])
     app.setStyle("Fusion")
-    widget = SimulationWidget(root, gpu_enabled=not opts.no_gpu)
-    widget.setWindowTitle("UV3D — 3D print simulation (isolated)")
-    widget.resize(1420, 860)
+    widget = QTabWidget()
+    simulator = SimulationWidget(root, gpu_enabled=not opts.no_gpu)
+    gantry = GantrySetupWidget(root)
+    simulator.set_gantry_config(gantry.config)
+    gantry.configurationChanged.connect(simulator.set_gantry_config)
+    widget.addTab(simulator, "3D printing simulation")
+    widget.addTab(gantry, "Gantry setup — heads & UV lamps")
+    widget.setWindowTitle("UV3D — 3D printing simulation & gantry setup (isolated)")
+    widget.resize(1580, 930)
     widget.show()
-    widget.load_job(opts.job)
+    simulator.load_job(opts.job)
     # Controlled process-exit probes are used ONLY by CI to verify that
     # a sudden child process death does not terminate the parent UV3D GUI.
     test_exit = os.environ.get("UV3D_SIMULATION_TEST_EXIT_MS")
