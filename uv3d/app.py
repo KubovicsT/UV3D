@@ -480,9 +480,12 @@ class MainWindow(QMainWindow):
                                 "UV3D will close, fast-forward from GitHub/main, check dependencies "
                                 "and reopen. Continue?") != QMessageBox.Yes:
             return
-        flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        # Display a separate visible PowerShell console rather than silently
+        # detaching the updater. -NoExit retains the final status/errors.
+        flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
         try:
-            subprocess.Popen(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            subprocess.Popen(["powershell.exe", "-NoProfile", "-NoExit",
+                              "-ExecutionPolicy", "Bypass", "-File",
                               str(script), "-WaitForPid", str(os.getpid())],
                              cwd=str(ROOT), creationflags=flags, close_fds=True)
         except Exception as exc:
