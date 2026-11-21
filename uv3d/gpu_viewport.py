@@ -149,6 +149,10 @@ class GpuModelViewport(QOpenGLWidget):
         self._line_count = 0
         self._plate_dirty = True
         self._plate_count = 0
+        self._support_lines = None
+        self._support_dirty = True
+        self._support_count = 0
+        self._support_visible = False
         self.yaw, self.pitch = camera_preset("Isometric")
         self.zoom = 1.0
         self.pan = np.zeros(2, dtype=float)
@@ -168,6 +172,7 @@ class GpuModelViewport(QOpenGLWidget):
         self._cap_timer.timeout.connect(self._start_cap)
 
     def set_scene(self, source_mesh, gpu_geometry, target_height_mm, reset_camera=False):
+        self.set_support_preview_lines(None)
         self.original_mesh = source_mesh
         self._payload = gpu_geometry
         self._gpu_dirty = True
@@ -199,6 +204,21 @@ class GpuModelViewport(QOpenGLWidget):
         self.slice_z = min(self.slice_z, float(height))
         if self.slice_mode:
             self._cap_timer.start()
+        self.update()
+
+    def set_support_preview_lines(self, lines):
+        if lines is None:
+            self._support_lines = None
+        else:
+            prepared = np.asarray(lines, dtype=np.float32).reshape(-1, 3)
+            if len(prepared) % 2:
+                raise ValueError("Support preview must contain pairs of GL line vertices.")
+            self._support_lines = prepared
+        self._support_dirty = True
+        self.update()
+
+    def set_show_support_preview(self, active):
+        self._support_visible = bool(active)
         self.update()
 
     def reset_camera(self):
@@ -323,6 +343,8 @@ class GpuModelViewport(QOpenGLWidget):
             self._line_vbo = GL.glGenBuffers(1)
             self._plate_vao = GL.glGenVertexArrays(1)
             self._plate_vbo = GL.glGenBuffers(1)
+            self._support_vao = GL.glGenVertexArrays(1)
+            self._support_vbo = GL.glGenBuffers(1)
             self._gpu_ready = True
         except Exception as exc:
             self._gpu_ready = False
@@ -439,6 +461,44 @@ class GpuModelViewport(QOpenGLWidget):
         self._set1f("uScale", self._scale)
         self._set1f("uBaseZ", self._base_min_z)
 
+    def _draw_support_wireframe(self):
+        """Draw a decimated purple preview, never the full support voxel grid."""
+        if self._support_dirty:
+            data = (self._support_lines if self._support_lines is not None
+                    else np.empty((0, 3), dtype=np.float32))
+            packed = np.empty(len(data), dtype=VERTEX_DTYPE)
+            packed["position"] = data
+            packed["color"] = [169, 116, 230, 165]
+            GL.glBindVertexArray(self._support_vao)
+            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._support_vbo)
+            GL.glBufferData(GL.GL_ARRAY_BUFFER, packed.nbytes,
+                            packed.tobytes(), GL.GL_DYNAMIC_DRAW)
+            GL.glEnableVertexAttribArray(0)
+            GL.glVertexAttribPointer(
+                0, 3, GL.GL_FLOAT, GL.GL_FALSE, 16, ctypes.c_void_p(0))
+            GL.glEnableVertexAttribArray(1)
+            GL.glVertexAttribPointer(
+                1, 4, GL.GL_UNSIGNED_BYTE, GL.GL_TRUE, 16, ctypes.c_void_p(12))
+            self._support_count = len(data)
+            self._support_dirty = False
+        if not self._support_count:
+            return
+        GL.glUniform1i(GL.glGetUniformLocation(self._program, "uMode"), 4)
+        GL.glBindVertexArray(self._support_vao)
+        # Preview lines are already in scaled model millimeters.
+        self._set1f("uScale", 1)
+        self._set1f("uBaseZ", 0)
+        GL.glEnable(GL.GL_BLEND)
+        GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
+        GL.glDisable(GL.GL_DEPTH_TEST)
+        try:
+            GL.glDrawArrays(GL.GL_LINES, 0, self._support_count)
+        finally:
+            GL.glEnable(GL.GL_DEPTH_TEST)
+            GL.glDisable(GL.GL_BLEND)
+            self._set1f("uScale", self._scale)
+            self._set1f("uBaseZ", self._base_min_z)
+
     def _draw_cut_lines(self):
         if self._line_dirty:
             data = np.asarray(self._line_data, dtype=np.float32)
@@ -490,6 +550,8 @@ class GpuModelViewport(QOpenGLWidget):
             GL.glClear(GL.GL_DEPTH_BUFFER_BIT)
             GL.glDisable(GL.GL_BLEND)
         self._draw_model(0)
+        if self._support_visible and self._support_lines is not None:
+            self._draw_support_wireframe()
         if self.slice_mode and self._line_data is not None and len(self._line_data):
             self._draw_cut_lines()
         GL.glBindVertexArray(0)
