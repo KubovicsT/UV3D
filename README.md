@@ -1,6 +1,6 @@
 # UV3D
 
-**Prototype v0.6 — offline experimental UV slicing. No printhead, motor, UV lamp, or printer control is implemented.**
+**Prototype v0.7 — offline experimental UV slicing. No printhead, motor, UV lamp, or printer control is implemented.**
 
 UV3D targets the Gongzheng H6090EI (three Epson i3200 heads, CMYK/white/varnish), with FlexiPRINT MiniTX GongZheng Edition and Gongzheng PrintExp. It is independent of both vendor applications.
 
@@ -18,7 +18,7 @@ UV3D targets the Gongzheng H6090EI (three Epson i3200 heads, CMYK/white/varnish)
 - **Crash-resistant layer generation:** masks are generated in a **separate Python process**, so a native OpenCV/geometry failure can terminate the worker without closing UV3D. The main window shows progress, a Cancel button and an error dialog with a log path. Every job gets a diagnostic log under `workspace/logs`; incomplete output remains separated under `workspace/jobs`.
 - **Compatibility slicing:** optional checkbox switches to the older, slower PIL/GEOS workflow if a particular model fails in the accelerated worker.
 - **Solid volume model masks:** all pixels inside each printable cross-section are filled with the selected body material (white or varnish proposal), rather than outputting only a thin outer color contour. Intentional geometric voids and through-holes are preserved according to the mesh.
-- **Conformal sacrificial support (experimental):** additional separate `_support.png` grayscale masks for each layer. Supports follow the model with an adjustable **0–5 mm casing** and extend vertically all the way to the build plate beneath every higher occupied pixel. The algorithm uses a cumulative top-down XY envelope rather than a full rectangular cube. Both accelerated and compatibility slicing modes support this.
+- **Conformal sacrificial support (experimental):** additional separate `_support.png` grayscale masks for each layer. Supports follow the model with an adjustable **0–5 mm casing** and extend vertically all the way to the build plate beneath every higher occupied pixel. The algorithm uses a cumulative top-down XY envelope rather than a full rectangular cube. **New optional 0–5 mm solid support-only top cover** adds layers over the union of the entire model projection; the slicer UI defaults to 0.6 mm. Both accelerated and compatibility modes support this.
 - **Support preview:** choose `combined` to see solid part (white), approximate surface color and purple support together, or `support` to view the proposed sacrificial material alone. The Windows GPU view also shows a *sampled 3D purple wireframe* after export, with a visibility checkbox. Only the wireframe is sampled: all mask PNGs remain full resolution.
 - **Volume comparison:** the job manifest records estimated solid/support volume and support savings against a solid rectangular enclosure around the footprint. These are raster-based geometric estimates, not measured ink requirements.
 - **Faster layer generation:** Z-range face filtering, loop stitching, OpenCV filling/PNG encoding, and reuse of unchanged/blank layer masks. Still produces same-size white, varnish and approximate colored boundary PNGs for every layer, plus a JSON job manifest.
@@ -86,6 +86,8 @@ The production app doesn't rely on system Python. MIT licensed: see LICENSE.
 
 **UV3D does not yet have a verified water-soluble support ink, a dedicated support printhead/channel, or a validated RIP mapping.** The grayscale support PNG is a *fourth conceptual material channel* and must not be sent to the Gongzheng printer as CMYK, white, or varnish. Ordinary white/varnish UV inks are not assumed water-soluble, and using them as support can permanently encase the part.
 
+The slicer also offers a **solid sacrificial top cover**: extra support-only masks above the model, filling the union of all model/support XY columns. This is needed for an actual fully enclosed model; the existing jobs must be re-sliced with top cover enabled to add those layers.
+
 The support algorithm fills **all unsupported XY columns continuously down to the printbed**. Under a wide upper ledge, the *entire left and right regions below the ledge* are filled with support, all the way down. There must not be empty gaps below a support shell. Unlike a full rectangular support cube, regions outside the downward-projected shape (plus casing allowance) remain empty.
 
 For each XY pixel, look at every model/casing pixel above the current layer: if **any** of them is present, the current pixel must contain either solid model or support. Mathematically, the occupied support envelope is a cumulative union of all higher cross-sections. This is a solid, vertically connected volume, not a hollow casing.
@@ -126,15 +128,20 @@ After generating masks, open the **Print queue — simulation** tab and click **
 
 The 3D viewport shows a simplified cuboid representing the printhead, traveling along an **illustrative serpentine path** above the model. The simulation reveals full-resolution model surface geometry below completed layer height and paints the current layer progressively from the actual exported mask files. The model preserves source face/vertex colors when available; STL generally has no embedded display color, so use **Uncolored model tint**. Full UV-mapped textures are still not accurately reproduced.
 
-A filled 3D sacrificial-support surface is generated from a **sampled/downscaled set of support masks** for smooth display, colored independently with adjustable opacity. The model's original triangle geometry is **not simplified** for Windows OpenGL rendering, but support preview geometry is deliberately coarse. The current printed layer uses the full material masks reduced only for on-screen GPU texturing; original exported PNGs remain unchanged.
+A filled 3D sacrificial-support surface is generated from **every actual exported support mask**, unioned within downsampled Z bands for smooth display. The former one-mask-per-band preview could miss narrow features and show false-looking holes. Support preview color and opacity are independent of the model. The model's original triangle geometry is **not simplified** for Windows OpenGL rendering, but support preview geometry is deliberately coarse. The current printed layer uses the full material masks reduced only for on-screen GPU texturing; original exported PNGs remain unchanged.
 
 - **Timeline**: 0 to 100,000 steps, freely scrubbable; play, pause, replay and layer-step buttons
-- **Printhead movement (mm/s)**: changes the *virtual* motion/total job time
+- **Printhead speed (printing, mm/s)**: virtual ink-deposition scan motion, initially 300 mm/s
+- **Movement speed (non-printing, mm/s)**: virtual travel, pass repositioning, return and Z adjustment, initially 600 mm/s
+- **Passes per 33.8 mm band**: adjustable 1–32 (illustrative default 6), changes estimated print duration
+- **Estimated job time, elapsed time, remaining time and progress %**: based on all printing and non-print motion segments; separate from replay speed
 - **Replay speed (×)**: changes how quickly virtual time advances in real time
 - **Support color / support opacity**: changes only the viewer; 0% hides the sacrificial material and 100% makes it opaque
 - **Show unprinted model silhouette**: toggles a faint ghost for reference before a layer is deposited
 
-This is a conceptual layer-by-layer animation, **not** a Hoson/PrintExp toolpath, a verified Epson printhead scan pattern, a genuine print-time estimate or machine control. Simulated layer-change delay, scan pitch and head clearance are display assumptions. Do not use simulated dimensions or movement as a safety setting.
+The virtual printhead is a **real-size Epson i3200-U1 body (69.1 × 59.5 × 35.6 mm)**, with **33.8 mm effective print swath** according to Epson's specifications. At each layer, continuous X scans run at the print speed, reposition/stepover moves at the travel speed, a visible return goes to the next layer's start, and a continuous Z move raises the head before new printing. When the head already finishes at that position, no unnecessary return is inserted. The timer, progress percentage and ETA include all these motion segments.
+
+This remains an **illustrative print-time estimate**, not a measured H6090EI print time: the machine's three-head carriage spacing, real RIP pass arrangement, UV curing duration, acceleration and controller travel limits have not been verified. The simulation does not issue PrintExp/Hoson motor or printing commands. The modeled head dimensions are the individual i3200-U1 head body, not the full installed 3-head carriage. Epson specifications: https://inkjet-solution.epson.com/products/i-series.html
 
 ### Qt timer/thread crash fix (0.6.3)
 
