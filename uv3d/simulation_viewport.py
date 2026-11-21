@@ -44,11 +44,18 @@ uniform int uScanDirection;
 uniform bool uPrinting;
 uniform float uModelProgress;
 uniform float uSupportProgress;
+uniform float uModelRowShift;
+uniform float uSupportRowShift;
+uniform float uRasterBandScale;
 uniform bool uFullLayer;
 
-float printedCoverage(float physicalScanProgress) {
-    int row = min(uRows - 1,
-        int(floor(clamp(vUV.y, 0.0, 0.9999999) * float(uRows))));
+float printedCoverage(float physicalScanProgress, float rowShift) {
+    // A head offset along Y changes which pass band reaches each raster
+    // pixel. This preserves the real printing direction for staggered heads.
+    int row = clamp(
+        int(floor(clamp(vUV.y, 0.0, 0.9999999) *
+                  uRasterBandScale + rowShift)),
+        0, uRows - 1);
     if (uFullLayer || row < uRowIndex) return 1.0;
     if (row > uRowIndex) return 0.0;
     float current = 0.0;
@@ -68,13 +75,13 @@ void main() {
     float body = texture(uBody, vUV).r;
     float support = texture(uSupport, vUV).r;
     if (body > 0.03) {
-        float coverage = printedCoverage(uModelProgress);
+        float coverage = printedCoverage(uModelProgress, uModelRowShift);
         if (coverage <= 0.0001) discard;
         vec4 source = texture(uColor, vUV);
         vec3 tint = mix(uCurrentModelTint, source.rgb, 0.12 * source.a);
         outColor = vec4(tint, coverage * body);
     } else if (support > 0.03) {
-        float coverage = printedCoverage(uSupportProgress);
+        float coverage = printedCoverage(uSupportProgress, uSupportRowShift);
         if (coverage <= 0.0001) discard;
         outColor = vec4(uCurrentSupportTint,
                         coverage * support * uSupportTint.a);
@@ -433,6 +440,9 @@ class SimulationViewport(GpuModelViewport):
                            int(frame.printing))
             self._set1f("uModelProgress", frame.model_scan_fraction)
             self._set1f("uSupportProgress", frame.support_scan_fraction)
+            self._set1f("uModelRowShift", frame.model_row_shift)
+            self._set1f("uSupportRowShift", frame.support_row_shift)
+            self._set1f("uRasterBandScale", frame.raster_band_scale)
             GL.glUniform1i(GL.glGetUniformLocation(self._program, "uFullLayer"),
                            int(frame.completed))
             GL.glEnable(GL.GL_BLEND)
