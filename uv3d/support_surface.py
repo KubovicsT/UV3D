@@ -141,23 +141,35 @@ def build_support_surface(job_path: str | Path, max_xy: int = 96,
     nx = max(2, round(width_px * scale))
     ny = max(2, round(height_px * scale))
     nz = min(max_levels, len(layers))
-    sample_index = np.ceil(np.arange(1, nz + 1) * len(layers) / nz).astype(int) - 1
-    sampled = np.empty((nz, ny, nx), dtype=bool)
+    # Every source layer contributes to the downsampled preview. Previously
+    # one layer out of each 12+ layer band was sampled, so short support
+    # features vanished and left false-looking exposed patches on the model.
+    # Streaming max-union per Z band keeps peak memory small (~96³ booleans)
+    # while preserving every support voxel at display resolution.
+    edges = np.linspace(0, len(layers), nz + 1).astype(int)
+    sampled = np.zeros((nz, ny, nx), dtype=bool)
     z_edges = np.zeros(nz + 1, dtype=np.float32)
-    for k, idx in enumerate(sample_index):
-        record = layers[int(idx)]
-        support_filename = record.get("support")
-        if not support_filename:
-            raise ValueError("Support material channel is missing from this completed job.")
-        filename = job_path.parent / support_filename
-        png = cv2.imdecode(np.fromfile(filename, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
-        if png is None or png.shape != (height_px, width_px):
-            raise ValueError(f"Corrupt/inconsistent support PNG: {filename}")
-        resized = cv2.resize(png, (nx, ny),
-                             interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_NEAREST)
-        # Conservative reduction: keep thin supports visible.
-        sampled[k] = resized > 0
-        z_edges[k + 1] = float(record["target_stack_height_mm"])
+    for k in range(nz):
+        first, last = int(edges[k]), int(edges[k + 1])
+        last = max(first + 1, last)
+        for idx in range(first, last):
+            record = layers[idx]
+            support_filename = record.get("support")
+            if not support_filename:
+                raise ValueError(
+                    "Support material channel is missing from this completed job.")
+            filename = job_path.parent / support_filename
+            png = cv2.imdecode(np.fromfile(filename, dtype=np.uint8),
+                               cv2.IMREAD_GRAYSCALE)
+            if png is None or png.shape != (height_px, width_px):
+                raise ValueError(f"Corrupt/inconsistent support PNG: {filename}")
+            resized = cv2.resize(
+                png, (nx, ny), interpolation=(
+                    cv2.INTER_AREA if scale < 1 else cv2.INTER_NEAREST))
+            # Nonzero coverage survives resizing; union every physical Z
+            # slice instead of sampling a single possibly empty slice.
+            sampled[k] |= resized > 0
+        z_edges[k + 1] = float(layers[last - 1]["target_stack_height_mm"])
 
     settings = data["settings"]
     ppm = float(settings["dpi"]) / 25.4
