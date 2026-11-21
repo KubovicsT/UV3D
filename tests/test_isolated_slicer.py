@@ -45,7 +45,7 @@ def test_worker_success_and_progress_log(tmp_path):
     assert result and Path(result[0]).exists()
     manifest = json.loads(Path(result[0]).read_text(encoding="utf-8"))
     assert len(manifest["layers"]) == 2
-    assert progress and progress[-1] == (2, 2)
+    assert progress and progress[-1] == (4, 4)
     assert worker.log_path and "SUCCESS" in worker.log_path.read_text(encoding="utf-8")
 
 
