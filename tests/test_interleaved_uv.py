@@ -21,7 +21,10 @@ def example_job():
 def config(lamp_depth=45, swath=33.8, cure_passes=1):
     return GantryConfig(
         heads=[HeadConfig("White model", "white", swath_mm=swath)],
-        lamps=[LampConfig("UV", 65, 0, 20, lamp_depth)],
+        # Centered lamp is neither trailing side; it must cure in its
+        # separate post-print movement in either direction. This fixture
+        # specifically verifies the FALLBACK when inline curing is unsafe.
+        lamps=[LampConfig("UV", 0, 0, 20, lamp_depth)],
         cure_passes=cure_passes)
 
 
@@ -81,7 +84,11 @@ def test_narrow_lamps_only_cure_just_printed_band(lamp_depth, rows_per_band):
             curing = [s for s in plan.segments if s.kind == "cure"
                       and s.layer_index == layer and s.band_index == band]
             assert len(curing) == 2 * rows_per_band
-            assert all(s.speed_mm_s == plan.move_speed_mm_s for s in curing)
+            # A lamp can cover the full printed X span at its existing
+            # position and dwell, requiring no horizontal movement.
+            assert all(s.speed_mm_s in (0, plan.move_speed_mm_s)
+                       for s in curing)
+            assert all(s.duration_s > 0 for s in curing)
             assert all(s.pass_index in (0,1) for s in curing)
 
 
