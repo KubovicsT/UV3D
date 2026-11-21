@@ -124,8 +124,8 @@ class SimulationAssetsWorker(QObject):
 
 
 class LayerTextureWorker(QObject):
-    ready = Signal(int, object)
-    failed = Signal(int, str)
+    ready = Signal(str, int, object)
+    failed = Signal(str, int, str)
 
     def __init__(self, job_path, index):
         super().__init__()
@@ -135,10 +135,10 @@ class LayerTextureWorker(QObject):
     def run(self):
         try:
             self.ready.emit(
-                self.index,
+                self.job_path, self.index,
                 read_layer_textures(self.job_path, self.index))
         except Exception as exc:
-            self.failed.emit(self.index, f"{type(exc).__name__}: {exc}")
+            self.failed.emit(self.job_path, self.index, f"{type(exc).__name__}: {exc}")
 
 
 class SimulationWidget(QWidget):
@@ -442,16 +442,18 @@ class SimulationWidget(QWidget):
         thread.finished.connect(self._texture_thread_finished)
         thread.start()
 
-    def _texture_ready(self,index,arrays):
-        if self.viewport is None or self.plan is None:
+    def _texture_ready(self,job_path,index,arrays):
+        if (self.viewport is None or self.plan is None or
+                self.job_path is None or str(self.job_path) != job_path):
             return
         # Avoid stale layers when the user scrubs the timeline rapidly.
         if index == self._wanted_texture_layer:
             self._loaded_texture_layer = index
             self.viewport.set_layer_bitmaps(index,*arrays)
 
-    def _texture_failed(self,index,problem):
-        self.detail.setText(f"Layer {index+1:,} preview error: {problem}")
+    def _texture_failed(self,job_path,index,problem):
+        if self.job_path is not None and str(self.job_path) == job_path:
+            self.detail.setText(f"Layer {index+1:,} preview error: {problem}")
 
     def _texture_thread_finished(self):
         self._texture_thread = self._texture_worker = None
