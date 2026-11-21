@@ -39,7 +39,7 @@ class SlicerController(QObject):
     def running(self) -> bool:
         return self.process is not None
 
-    def start(self, source: Path, settings: SliceSettings) -> bool:
+    def start(self, source: Path, settings: SliceSettings, compatibility_mode: bool = False) -> bool:
         if self.running:
             return False
         settings.validate()
@@ -55,6 +55,7 @@ class SlicerController(QObject):
         request = {"source": str(Path(source).resolve()),
                    "output": str(self._output_dir),
                    "settings": asdict(settings),
+                   "compatibility_mode": bool(compatibility_mode),
                    "log_dir": str(log_dir)}
         self.request_path.write_text(json.dumps(request, indent=2),
                                      encoding="utf-8")
