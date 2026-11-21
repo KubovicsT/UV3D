@@ -153,7 +153,7 @@ The separate simulation window has a **Gantry setup — heads & UV lamps** tab. 
 
 - **Heads:** Add/remove or enable/disable multiple heads; set X/Y offsets, body dimensions and swath; assign Color/CMYK, White, Varnish, or experimental Support.
 - **Lamps:** Add/remove or enable/disable multiple UV lamps; edit X/Y offsets, illuminated footprint width/depth and housing height.
-- **UV curing passes:** Choose 1–5 coverage sweeps for each lamp. After layer deposition, the gantry makes visible UV-only moves so each enabled lamp footprint passes over the entire raster. During these scans the configured lamp illuminates a moving gold rectangle on the printed layer.
+- **UV curing per print pass:** After **each** printing pass, the gantry moves the configured lamp(s) over just the freshly printed swath before starting the next pass. For two passes the sequence is **print 1 → UV cure 1 → print 2 → UV cure 2**, not two printing passes followed by two UV passes. Each lamp makes 1–5 configurable sweeps after each print pass; narrower lamps use multiple tracks across that band. The gold rectangle illuminates only during the curing movement, not during printing or travel.
 - **One assembly:** All heads, UV lamps and the connecting carriage beam move together. Their layout affects scan travel, Y-band count, UV movement time, progress and ETA. Movement speed applies to UV-only sweeps, not print speed.
 - **Stored entirely within the app folder:** workspace/machine/gantry.json. Changes update virtual geometry and ETA without re-slicing or changing firmware.
 
