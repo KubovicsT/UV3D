@@ -87,7 +87,10 @@ class PrintSimulation:
         total = self.total_seconds
         elapsed = p * total
         complete = p >= 1.0
-        layer = min(self.count - 1, int(elapsed / self.layer_seconds))
+        # Timeline fractions like 2/5 can round a few ULPs below a layer
+        # boundary. Treat exact layer-step positions as the next layer.
+        layer = min(self.count - 1,
+                    int(math.floor(elapsed / self.layer_seconds + 1e-9)))
         offset = self.layer_seconds if complete else elapsed - layer * self.layer_seconds
         move_seconds = self.path_length_mm / self.move_speed_mm_s
         distance = min(self.path_length_mm, max(0.0, offset * self.move_speed_mm_s))
