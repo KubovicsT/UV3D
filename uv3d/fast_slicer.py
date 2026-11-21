@@ -106,8 +106,9 @@ def slice_fast(filename, output_dir, settings: SliceSettings,
     mesh = prepare_mesh(mesh, settings.target_height_mm)
     minimum, maximum = mesh.bounds
     width_mm, depth_mm, height_mm = (float(x) for x in mesh.extents)
-    if height_mm > 180:
-        raise ValueError("Model exceeds 180 mm nominal media clearance; no verified 3D build envelope exists.")
+    if height_mm + (settings.support_top_cap_mm if settings.support_enabled else 0) > 180:
+        raise ValueError("Model plus support top cover exceeds 180 mm nominal media clearance; "
+                         "no verified 3D build envelope exists.")
     ppm = settings.dpi / 25.4
     raster_margin = effective_raster_margin(settings)
     w = math.ceil((width_mm + 2 * raster_margin) * ppm)
