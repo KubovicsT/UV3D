@@ -146,6 +146,43 @@ def test_casing_is_not_clipped_when_bigger_than_user_margin(tmp_path):
     assert not np.any(border[:, -1])
 
 
+
+def test_full_width_of_overhanging_cap_is_filled_to_the_build_plate():
+    """Regression for user-marked red gaps beneath a wide upper model.
+
+    This catches the incorrect shell-only idea: a narrow central model stem
+    supports a much wider top slab. All the empty columns under BOTH sides
+    of that slab must be filled with support, throughout every lower layer,
+    not only a narrow exterior band following the surface.
+    """
+    height, width = 24, 40
+    stem = np.zeros((height, width), dtype=np.uint8)
+    stem[10:14, 18:22] = 255
+    roof = np.zeros_like(stem)
+    roof[7:17, 5:35] = 255
+    # Index 0 is the bed, index 5 is the uppermost printed layer.
+    parts = [stem.copy() for _ in range(5)] + [roof]
+    supports = [None] * len(parts)
+    envelope = np.zeros_like(stem)
+    for layer_idx in reversed(range(len(parts))):
+        supports[layer_idx], envelope = support_layer(parts[layer_idx], envelope)
+    # Both large undercut areas explicitly highlighted by the user must
+    # be support all the way down, not empty air underneath a casing.
+    for i in range(5):
+        assert np.all(supports[i][7:17, 5:18] == 255)
+        assert np.all(supports[i][7:17, 22:35] == 255)
+        # The central stem remains actual solid-model material.
+        assert np.all(supports[i][10:14, 18:22] == 0)
+        assert np.all(parts[i][10:14, 18:22] == 255)
+    # The cap itself must be solid, not just a thin perimeter.
+    assert np.all(parts[5][7:17, 5:35] == 255)
+    assert np.all(supports[5][7:17, 5:35] == 0)
+    # Still not a full rectangular support cube: the outside stays empty.
+    for i in range(6):
+        assert not np.any(supports[i][:, 0:4])
+        assert not np.any(supports[i][:, 36:])
+
+
 def test_bad_support_settings_rejected():
     with pytest.raises(ValueError, match="Support casing"):
         SliceSettings(support_casing_mm=6).validate()
