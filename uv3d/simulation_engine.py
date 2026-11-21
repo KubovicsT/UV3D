@@ -14,6 +14,14 @@ from .gantry import GantryConfig, HeadConfig, default_gantry
 
 TIMELINE_TICKS = 100_000
 
+# A lamp large enough to cover a full printed swath may cure while the
+# carriage is stationary. This is an illustrative hold, NOT calibrated dose.
+UV_STATIONARY_CURE_SECONDS = 0.1
+
+
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
 
 @dataclass(frozen=True)
 class PrintHeadSpec:
@@ -257,13 +265,17 @@ class PrintSimulation:
         last_xyz = (left, y_first,
                     float(self.layers[0]["target_stack_height_mm"]) + self.head_clearance_mm)
 
-        def add(kind, layer, dest, band, pidx, lamp_index=-1):
+        def add(kind, layer, dest, band, pidx, lamp_index=-1,
+                stationary_hold_s=0.0):
             nonlocal elapsed, elapsed_print, last_xyz
             dist = math.dist(last_xyz, dest)
             speed = self.print_speed_mm_s if kind == "print" else self.move_speed_mm_s
-            duration = dist / speed
-            # No zero-length return segment needed; every meaningful move has
-            # an explicit continuous start and end and positive duration.
+            # When a lamp footprint fully covers the just-printed strip at
+            # the current position, do not force a fictitious UV scan.
+            # Instead keep the gantry still and the lamp illuminated briefly.
+            duration = dist / speed if dist > 1e-12 else stationary_hold_s
+            if dist <= 1e-12 and duration > 0.0:
+                speed = 0.0
             if duration > 1e-12:
                 seg = MotionSegment(
                     kind, layer, last_xyz, dest, speed, duration,
@@ -329,30 +341,73 @@ class PrintSimulation:
                                                  / lamp.depth_mm))
                                 lamp_pitch = (
                                     (printed_top - printed_bottom) / lamp_rows)
-                                lamp_start_x = (
-                                    self.min_x - lamp.offset_x_mm -
-                                    lamp.width_mm * .5 - self.overscan_mm)
-                                lamp_end_x = (
-                                    self.min_x + self.width - lamp.offset_x_mm +
-                                    lamp.width_mm * .5 + self.overscan_mm)
+                                # The UV rectangle covers points from
+                                # lamp_center +/- half its illuminated size.
+                                # Crucially UV curing has NO nozzle overscan.
+                                # Earlier code reversed these +/- signs and
+                                # added overscan, forcing the entire carriage
+                                # unnecessarily far outside the printed model.
+                                #
+                                # If the lamp is wider than the whole raster,
+                                # many gantry positions already fully cover
+                                # its X span, and no X sweep is necessary.
+                                wide_x = lamp.width_mm >= self.width
+                                if wide_x:
+                                    possible_x_min = (
+                                        self.min_x + self.width -
+                                        lamp.width_mm * .5)
+                                    possible_x_max = (
+                                        self.min_x + lamp.width_mm * .5)
+                                else:
+                                    left_center_x = (
+                                        self.min_x + lamp.width_mm * .5)
+                                    right_center_x = (
+                                        self.min_x + self.width -
+                                        lamp.width_mm * .5)
                                 for cure_row in range(lamp_rows):
-                                    cure_y = (
-                                        printed_top - (cure_row + .5) * lamp_pitch -
-                                        lamp.offset_y_mm)
-                                    # Choose the near end to avoid unnecessary
-                                    # non-printing return, but move there
-                                    # explicitly (no jumps in gantry position).
-                                    if abs(last_xyz[0] - lamp_start_x) <= abs(
-                                            last_xyz[0] - lamp_end_x):
-                                        start_x, end_x = lamp_start_x, lamp_end_x
+                                    # Rows split only the JUST-PRINTED band.
+                                    # Keep the lamp as near as possible to
+                                    # the present gantry Y position when its
+                                    # depth already covers the whole band.
+                                    row_top = printed_top - cure_row * lamp_pitch
+                                    row_bottom = printed_top - (
+                                        cure_row + 1) * lamp_pitch
+                                    lamp_y = _clamp(
+                                        last_xyz[1] + lamp.offset_y_mm,
+                                        row_top - lamp.depth_mm * .5,
+                                        row_bottom + lamp.depth_mm * .5)
+                                    cure_y = lamp_y - lamp.offset_y_mm
+                                    if wide_x:
+                                        lamp_x = _clamp(
+                                            last_xyz[0] + lamp.offset_x_mm,
+                                            possible_x_min, possible_x_max)
+                                        cure_x = lamp_x - lamp.offset_x_mm
+                                        # No X travel at all when the current
+                                        # footprint already covers everything.
+                                        # Move Y only when truly required.
+                                        add("uv_travel", layer,
+                                            (cure_x, cure_y, z), band, pass_index,
+                                            lamp_index)
+                                        add("cure", layer,
+                                            (cure_x, cure_y, z), band, pass_index,
+                                            lamp_index,
+                                            stationary_hold_s=UV_STATIONARY_CURE_SECONDS)
                                     else:
-                                        start_x, end_x = lamp_end_x, lamp_start_x
-                                    add("uv_travel", layer,
-                                        (start_x, cure_y, z), band, pass_index,
-                                        lamp_index)
-                                    add("cure", layer,
-                                        (end_x, cure_y, z), band, pass_index,
-                                        lamp_index)
+                                        lamp_start_x = (
+                                            left_center_x - lamp.offset_x_mm)
+                                        lamp_end_x = (
+                                            right_center_x - lamp.offset_x_mm)
+                                        if abs(last_xyz[0] - lamp_start_x) <= abs(
+                                                last_xyz[0] - lamp_end_x):
+                                            start_x, end_x = lamp_start_x, lamp_end_x
+                                        else:
+                                            start_x, end_x = lamp_end_x, lamp_start_x
+                                        add("uv_travel", layer,
+                                            (start_x, cure_y, z), band, pass_index,
+                                            lamp_index)
+                                        add("cure", layer,
+                                            (end_x, cure_y, z), band, pass_index,
+                                            lamp_index)
             self._layer_print_time_s.append(print_seconds)
             # Explicit return at the non-printing movement speed, even for
             # final layer. Next layer starts exactly at this return position.
