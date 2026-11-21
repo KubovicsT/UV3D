@@ -73,9 +73,10 @@ class SimulationFrame:
 
 
 class PrintSimulation:
-    """Continuous motion: print across X, move between passes/bands, return,
-    then change Z. Both speeds modify actual segment durations. Binary-searched
-    timeline seeking remains fast even over 1000+ layers.
+    """Print each pass, immediately cure its swath, then print the next pass.
+
+    All segments are continuous in XYZ; movement speed applies to UV travel,
+    cure sweeps and returns. Seek uses a binary search even for large jobs.
     """
 
     def __init__(
@@ -299,37 +300,60 @@ class PrintSimulation:
                     before = elapsed
                     add("print", layer, (target_x, y, z), band, pass_index)
                     print_seconds += elapsed - before
+
+                    # Print -> UV cure -> print -> UV cure, for EACH pass.
+                    # Curing is restricted to the just-printed Y strip,
+                    # rather than re-illuminating every band after the whole
+                    # layer has already been deposited. Mounted lamps and
+                    # printheads share a physical gantry coordinate system.
+                    # Work out which part of the raster the heads could have
+                    # reached during this printing pass.
+                    printed_top = min(
+                        self.max_y,
+                        max(y + head.offset_y_mm + head.swath_mm * .5
+                            for head in active_heads))
+                    printed_bottom = max(
+                        self.min_y,
+                        min(y + head.offset_y_mm - head.swath_mm * .5
+                            for head in active_heads))
+                    if printed_top > printed_bottom:
+                        for _ in range(self.gantry_config.cure_passes):
+                            for lamp_index, lamp in enumerate(self.gantry_config.lamps):
+                                if not lamp.enabled:
+                                    continue
+                                # A narrow lamp requires more than one
+                                # coverage sweep *of the printed strip*.
+                                # No fictitious whole-layer UV pass is added.
+                                lamp_rows = max(
+                                    1, math.ceil((printed_top - printed_bottom)
+                                                 / lamp.depth_mm))
+                                lamp_pitch = (
+                                    (printed_top - printed_bottom) / lamp_rows)
+                                lamp_start_x = (
+                                    self.min_x - lamp.offset_x_mm -
+                                    lamp.width_mm * .5 - self.overscan_mm)
+                                lamp_end_x = (
+                                    self.min_x + self.width - lamp.offset_x_mm +
+                                    lamp.width_mm * .5 + self.overscan_mm)
+                                for cure_row in range(lamp_rows):
+                                    cure_y = (
+                                        printed_top - (cure_row + .5) * lamp_pitch -
+                                        lamp.offset_y_mm)
+                                    # Choose the near end to avoid unnecessary
+                                    # non-printing return, but move there
+                                    # explicitly (no jumps in gantry position).
+                                    if abs(last_xyz[0] - lamp_start_x) <= abs(
+                                            last_xyz[0] - lamp_end_x):
+                                        start_x, end_x = lamp_start_x, lamp_end_x
+                                    else:
+                                        start_x, end_x = lamp_end_x, lamp_start_x
+                                    add("uv_travel", layer,
+                                        (start_x, cure_y, z), band, pass_index,
+                                        lamp_index)
+                                    add("cure", layer,
+                                        (end_x, cure_y, z), band, pass_index,
+                                        lamp_index)
             self._layer_print_time_s.append(print_seconds)
-            # Every enabled UV lamp must physically cross the current layer
-            # at least once for each requested cure sweep. The printhead,
-            # lamps and beam all travel together; the lamp cannot magically
-            # illuminate an area beyond its configured footprint.
-            for _ in range(self.gantry_config.cure_passes):
-                for lamp_index, lamp in enumerate(self.gantry_config.lamps):
-                    if not lamp.enabled:
-                        continue
-                    lamp_rows = max(1, math.ceil(self.depth / lamp.depth_mm))
-                    lamp_pitch = self.depth / lamp_rows
-                    lamp_start_x = (
-                        self.min_x - lamp.offset_x_mm -
-                        lamp.width_mm * .5 - self.overscan_mm)
-                    lamp_end_x = (
-                        self.min_x + self.width - lamp.offset_x_mm +
-                        lamp.width_mm * .5 + self.overscan_mm)
-                    for cure_row in range(lamp_rows):
-                        cure_y = (
-                            self.max_y - (cure_row + .5) * lamp_pitch -
-                            lamp.offset_y_mm)
-                        # The nearest sweep endpoint minimizes dead travel.
-                        if abs(last_xyz[0] - lamp_start_x) <= abs(
-                                last_xyz[0] - lamp_end_x):
-                            start_x, end_x = lamp_start_x, lamp_end_x
-                        else:
-                            start_x, end_x = lamp_end_x, lamp_start_x
-                        add("uv_travel", layer, (start_x, cure_y, z),
-                            self.rows - 1, self.passes, lamp_index)
-                        add("cure", layer, (end_x, cure_y, z),
-                            self.rows - 1, self.passes, lamp_index)
             # Explicit return at the non-printing movement speed, even for
             # final layer. Next layer starts exactly at this return position.
             add("return", layer, (left, y_first, z), self.rows - 1, self.passes - 1)
@@ -383,18 +407,18 @@ class PrintSimulation:
             scan_fraction = model_fraction
             completed_passes = segment.pass_index
         else:
-            # A travel/stepover precedes the next pass. Return and Z moves
-            # follow the LAST pass; no more deposition occurs there.
+            # Non-printing motion must NOT deposit any new material.
+            # Cure sweeps occur immediately AFTER one print pass, so only
+            # that pass has completed; never show the whole layer as printed
+            # while the first UV cure is moving.
             direction = 1
             scan_fraction = 0.0
             completed_passes = (
-                self.passes if segment.kind in (
-                    "return", "z_move", "uv_travel", "cure")
+                self.passes if segment.kind in ("return", "z_move")
+                else segment.pass_index + 1 if segment.kind in
+                ("uv_travel", "cure")
                 else segment.pass_index)
             model_fraction = support_fraction = scan_fraction
-        if segment.curing:
-            # Material deposition is finished before UV-only movement.
-            completed_passes = self.passes
         return SimulationFrame(
             layer_index=layer, layer_count=self.count,
             layer_progress=layer_progress,
@@ -419,7 +443,9 @@ class PrintSimulation:
             passes_completed=completed_passes,
             model_scan_fraction=model_fraction,
             support_scan_fraction=support_fraction,
-            lamp_active=(segment.printing or segment.curing),
+            # UV light starts only when the mounted lamp moves along its
+            # post-pass curing route, not prematurely during ink deposition.
+            lamp_active=segment.curing,
             active_lamp_index=segment.lamp_index,
             curing=segment.curing,
             model_row_shift=(self._model_head.offset_y_mm -
