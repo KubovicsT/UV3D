@@ -10,6 +10,8 @@ from bisect import bisect_right
 from dataclasses import dataclass
 import math
 
+from .gantry import GantryConfig, HeadConfig, default_gantry
+
 TIMELINE_TICKS = 100_000
 
 
@@ -33,6 +35,8 @@ class MotionSegment:
     band_index: int
     pass_index: int
     printing: bool
+    lamp_index: int = -1
+    curing: bool = False
 
 
 @dataclass(frozen=True)
@@ -58,6 +62,11 @@ class SimulationFrame:
     pass_index: int = 0
     scan_direction: int = 1             # +1 scans left->right, -1 right->left
     passes_completed: int = 0          # completed printing passes in current band
+    model_scan_fraction: float = 0.0
+    support_scan_fraction: float = 0.0
+    lamp_active: bool = False
+    active_lamp_index: int = -1
+    curing: bool = False
 
 
 class PrintSimulation:
@@ -72,8 +81,11 @@ class PrintSimulation:
         print_speed_mm_s: float = 300.0, passes: int = 6,
         overscan_mm: float = 10.0, head_spec: PrintHeadSpec | None = None,
         print_mode: str = "bidirectional",
+        gantry_config: GantryConfig | None = None,
     ):
         self.layers = manifest.get("layers", [])
+        self._body_material = manifest.get("settings", {}).get(
+            "body_material", "white")
         if not self.layers:
             raise ValueError("A completed layer-mask job is required for simulation.")
         self.count = len(self.layers)
@@ -93,6 +105,14 @@ class PrintSimulation:
         if self.width <= 0 or self.depth <= 0:
             raise ValueError("Invalid job raster size.")
         self.head_spec = head_spec or PrintHeadSpec()
+        # Core engine callers without a gantry explicitly configured retain
+        # a single-head / no-UV calculation. The GUI loads the user's
+        # configured 3-head + lamp arrangement from its folder-local settings.
+        self.gantry_config = (
+            GantryConfig.from_dict(gantry_config.as_dict()) if gantry_config
+            else GantryConfig(
+                heads=[HeadConfig("i3200-U1", "color")], lamps=[]))
+        self.gantry_config.validate()
         self.scan_pitch_mm = float(
             scan_pitch_mm if scan_pitch_mm is not None else self.head_spec.swath_mm)
         self.head_clearance_mm = float(head_clearance_mm)
@@ -132,6 +152,12 @@ class PrintSimulation:
         if mode not in ("bidirectional", "unidirectional"):
             raise ValueError("Printing direction must be bidirectional or unidirectional.")
         return mode
+
+    def set_gantry_config(self, gantry_config: GantryConfig):
+        """Change offsets/lamps and rebuild both route and estimated time."""
+        config = GantryConfig.from_dict(gantry_config.as_dict())
+        self.gantry_config = config
+        self._build_path()
 
     def set_print_speed(self, value: float):
         self.print_speed_mm_s = self._validate_speed(value)
@@ -188,13 +214,20 @@ class PrintSimulation:
         self._layer_print_time_s = []
         elapsed = 0.0
         elapsed_print = 0.0
-        left = self.min_x - self.overscan_mm
-        right = self.min_x + self.width + self.overscan_mm
+        active_heads = [h for h in self.gantry_config.heads if h.enabled]
+        active_lamps = [l for l in self.gantry_config.lamps if l.enabled]
+        # Head offsets determine how far the gantry itself must travel for
+        # every installed material head to cover the full XY raster.
+        left = (self.min_x - max(h.offset_x_mm for h in active_heads)
+                - self.overscan_mm)
+        right = (self.min_x + self.width
+                 - min(h.offset_x_mm for h in active_heads)
+                 + self.overscan_mm)
         y_first = self.max_y - self.row_step * 0.5
         last_xyz = (left, y_first,
                     float(self.layers[0]["target_stack_height_mm"]) + self.head_clearance_mm)
 
-        def add(kind, layer, dest, band, pidx):
+        def add(kind, layer, dest, band, pidx, lamp_index=-1):
             nonlocal elapsed, elapsed_print, last_xyz
             dist = math.dist(last_xyz, dest)
             speed = self.print_speed_mm_s if kind == "print" else self.move_speed_mm_s
@@ -202,8 +235,10 @@ class PrintSimulation:
             # No zero-length return segment needed; every meaningful move has
             # an explicit continuous start and end and positive duration.
             if duration > 1e-12:
-                seg = MotionSegment(kind, layer, last_xyz, dest, speed,
-                                    duration, band, pidx, kind == "print")
+                seg = MotionSegment(
+                    kind, layer, last_xyz, dest, speed, duration,
+                    band, pidx, kind == "print", lamp_index,
+                    kind == "cure")
                 self.segments.append(seg)
                 elapsed += duration
                 if kind == "print":
@@ -236,6 +271,36 @@ class PrintSimulation:
                     add("print", layer, (target_x, y, z), band, pass_index)
                     print_seconds += elapsed - before
             self._layer_print_time_s.append(print_seconds)
+            # Every enabled UV lamp must physically cross the current layer
+            # at least once for each requested cure sweep. The printhead,
+            # lamps and beam all travel together; the lamp cannot magically
+            # illuminate an area beyond its configured footprint.
+            for _ in range(self.gantry_config.cure_passes):
+                for lamp_index, lamp in enumerate(self.gantry_config.lamps):
+                    if not lamp.enabled:
+                        continue
+                    lamp_rows = max(1, math.ceil(self.depth / lamp.depth_mm))
+                    lamp_pitch = self.depth / lamp_rows
+                    lamp_start_x = (
+                        self.min_x - lamp.offset_x_mm -
+                        lamp.width_mm * .5 - self.overscan_mm)
+                    lamp_end_x = (
+                        self.min_x + self.width - lamp.offset_x_mm +
+                        lamp.width_mm * .5 + self.overscan_mm)
+                    for cure_row in range(lamp_rows):
+                        cure_y = (
+                            self.max_y - (cure_row + .5) * lamp_pitch -
+                            lamp.offset_y_mm)
+                        # The nearest sweep endpoint minimizes dead travel.
+                        if abs(last_xyz[0] - lamp_start_x) <= abs(
+                                last_xyz[0] - lamp_end_x):
+                            start_x, end_x = lamp_start_x, lamp_end_x
+                        else:
+                            start_x, end_x = lamp_end_x, lamp_start_x
+                        add("uv_travel", layer, (start_x, cure_y, z),
+                            self.rows - 1, self.passes, lamp_index)
+                        add("cure", layer, (end_x, cure_y, z),
+                            self.rows - 1, self.passes, lamp_index)
             # Explicit return at the non-printing movement speed, even for
             # final layer. Next layer starts exactly at this return position.
             add("return", layer, (left, y_first, z), self.rows - 1, self.passes - 1)
@@ -275,23 +340,40 @@ class PrintSimulation:
             layer_progress = 1.0
         if segment.printing:
             direction = 1 if segment.end_xyz[0] > segment.start_xyz[0] else -1
-            # Head X is referenced to the ACTUAL raster bounds (not
-            # overscan distance), so the same physical pixel is revealed
-            # exactly when the printhead reaches it in either direction.
             raster_left = self.min_x
-            if direction == 1:
-                scan_fraction = (xyz[0] - raster_left) / self.width
-            else:
-                scan_fraction = (raster_left + self.width - xyz[0]) / self.width
-            scan_fraction = max(0.0, min(1.0, scan_fraction))
+            active_heads = [h for h in self.gantry_config.heads if h.enabled]
+            preferred = next(
+                (h for h in active_heads
+                 if h.material == self._body_material), active_heads[0])
+            support_head = next(
+                (h for h in active_heads if h.material == "support"),
+                active_heads[0])
+
+            def scan_for(head):
+                physical_x = xyz[0] + head.offset_x_mm
+                if direction > 0:
+                    p = (physical_x - raster_left) / self.width
+                else:
+                    p = (raster_left + self.width - physical_x) / self.width
+                return max(0.0, min(1.0, p))
+
+            model_fraction = scan_for(preferred)
+            support_fraction = scan_for(support_head)
+            scan_fraction = model_fraction
             completed_passes = segment.pass_index
         else:
             # A travel/stepover precedes the next pass. Return and Z moves
             # follow the LAST pass; no more deposition occurs there.
             direction = 1
             scan_fraction = 0.0
-            completed_passes = (self.passes if segment.kind in ("return", "z_move")
-                                else segment.pass_index)
+            completed_passes = (
+                self.passes if segment.kind in (
+                    "return", "z_move", "uv_travel", "cure")
+                else segment.pass_index)
+            model_fraction = support_fraction = scan_fraction
+        if segment.curing:
+            # Material deposition is finished before UV-only movement.
+            completed_passes = self.passes
         return SimulationFrame(
             layer_index=layer, layer_count=self.count,
             layer_progress=layer_progress,
@@ -314,6 +396,11 @@ class PrintSimulation:
             pass_index=segment.pass_index,
             scan_direction=direction,
             passes_completed=completed_passes,
+            model_scan_fraction=model_fraction,
+            support_scan_fraction=support_fraction,
+            lamp_active=(segment.printing or segment.curing),
+            active_lamp_index=segment.lamp_index,
+            curing=segment.curing,
         )
 
     def step_layer(self, timeline_fraction: float, amount: int) -> float:
