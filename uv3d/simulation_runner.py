@@ -70,7 +70,7 @@ def main(argv=None):
         location = (f"{context.file}:{context.line}" if context.file else "Qt")
         line = (f"{datetime.now().isoformat(timespec='milliseconds')} "
                 f"[thread={threading.get_ident()}] {location} "
-                f"Qt({int(kind)}): {message}\\n")
+                f"Qt({kind}): {message}\n")
         try:
             _LOG_HANDLE.write(line)
             _LOG_HANDLE.flush()
