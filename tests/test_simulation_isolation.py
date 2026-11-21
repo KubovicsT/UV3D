@@ -74,7 +74,11 @@ def test_simulation_child_can_exit_or_crash_without_main_gui_crash(tmp_path, mon
         assert main_tab.busy
         wait_for(app, lambda: not main_tab.busy)
     else:
-        assert "closed" in main_tab.status.text().lower()
+        assert "closed" in main_tab.status.text().lower(), (
+            report.read_text(encoding="utf-8") +
+            "\n--- native log ---\n" +
+            (tmp_path/"workspace"/"logs"/"uv3d-simulation-native.log").read_text(
+                encoding="utf-8"))
     app.processEvents()
     main_tab.close()
 
