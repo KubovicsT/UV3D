@@ -44,11 +44,16 @@ def test_oversized_aligned_uv_lamp_fully_sweeps_every_printed_pixel(
         filtered=[(i,s) for i,s in enumerate(plan.segments)
                   if s.layer_index==layer and s.kind in
                   ("print","uv_travel","cure")]
-        assert [s.kind for _,s in filtered] == ["print","cure"]*passes
+        # The dedicated full-footprint sweep starts outside the raster.
+        # Repositioning is explicit and the lamp is OFF during that move.
+        assert [s.kind for _,s in filtered] == (
+            ["print","uv_travel","cure"]*passes)
         for idx,(i,s) in enumerate(filtered):
             if s.kind=="cure":
                 previous=filtered[idx-1][1]
-                assert previous.kind=="print"
+                assert previous.kind=="uv_travel"
+                assert not previous.curing
+                assert previous.end_xyz == pytest.approx(s.start_xyz)
                 # The full 100-mm lamp footprint must pass from just
                 # outside X=0 to just outside X=20: 120 mm of travel.
                 assert abs(s.end_xyz[0]-s.start_xyz[0]) == pytest.approx(120)
@@ -112,7 +117,8 @@ def test_oversized_lamp_stays_aligned_in_y_without_reposition():
                          gantry_config=config)
     for i,s in enumerate(plan.segments):
         if s.kind=="cure":
-            earlier=plan.segments[i-1]
-            assert earlier.kind=="print"
+            # The lamp may first travel to the full-footprint sweep start.
+            earlier=next(p for p in reversed(plan.segments[:i])
+                         if p.kind=="print")
             assert s.start_xyz[1]==pytest.approx(earlier.end_xyz[1])
             assert s.end_xyz[1]==pytest.approx(earlier.end_xyz[1])
