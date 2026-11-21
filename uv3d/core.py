@@ -204,8 +204,9 @@ def _slice_model_legacy(filename: str | Path, output_dir: str | Path, settings: 
     mesh = prepare_mesh(mesh, settings.target_height_mm)
     minimum, maximum = mesh.bounds
     model_width, model_depth, model_height = mesh.extents
-    if model_height > 180:
-        raise ValueError("Model exceeds 180 mm nominal media clearance; no verified 3D build envelope exists.")
+    if model_height + (settings.support_top_cap_mm if settings.support_enabled else 0) > 180:
+        raise ValueError("Model plus support top cover exceeds 180 mm nominal media clearance; "
+                         "no verified 3D build envelope exists.")
     pixel_per_mm = settings.dpi / 25.4
     raster_margin = effective_raster_margin(settings)
     w = math.ceil((model_width + 2 * raster_margin) * pixel_per_mm)
