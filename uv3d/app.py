@@ -173,6 +173,11 @@ class MainWindow(QMainWindow):
             else:
                 ctl.valueChanged.connect(self.invalidate_export)
 
+        self.compatibility_mode = QCheckBox(
+            "Compatibility slicing (slower; alternative to accelerated OpenCV)")
+        self.compatibility_mode.setToolTip(
+            "Try this if a model repeatedly crashes the accelerated slicer.")
+        controls.addWidget(self.compatibility_mode)
         self.export_button = QPushButton("Generate offline layer masks")
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.start_export)
@@ -507,11 +512,14 @@ class MainWindow(QMainWindow):
         )
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
-        self.slicer.start(self.mesh_path, settings)
+        self.slicer.start(
+            self.mesh_path, settings,
+            compatibility_mode=self.compatibility_mode.isChecked())
 
     def on_slicer_running_changed(self, running):
         self.export_button.setEnabled(not running and self.mesh_path is not None)
         self.cancel_export_button.setEnabled(running)
+        self.compatibility_mode.setEnabled(not running)
         self.open_button.setEnabled(not running and self.import_thread is None)
         for control in (self.model_height, self.layer, self.dpi, self.shell,
                         self.body, self.x_pos, self.y_pos):
@@ -534,7 +542,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage('Layer generation failed; see diagnostic log')
         QMessageBox.warning(self, 'UV3D layer generation failed',
                             f'{problem}\n\nCrash report: {log_path}\n'
-                            'The app remains open. Incomplete output is retained.')
+                            'The app remains open. Incomplete output is retained.\n'
+                            'Try Compatibility slicing if the model fails again.')
 
     def cancel_export(self):
         if self.slicer.running and QMessageBox.question(
