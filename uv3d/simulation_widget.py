@@ -18,8 +18,8 @@ from PySide6.QtCore import QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QDoubleSpinBox, QFileDialog, QGroupBox,
-    QHBoxLayout, QLabel, QMessageBox, QPushButton, QSlider, QVBoxLayout,
-    QWidget,
+    QHBoxLayout, QLabel, QMessageBox, QPushButton, QSlider, QSpinBox,
+    QVBoxLayout, QWidget,
 )
 
 from .simulation_engine import (
@@ -225,14 +225,30 @@ class SimulationWidget(QWidget):
 
         speeds = QGroupBox("Simulation speed")
         speeds_layout = QVBoxLayout(speeds)
-        speeds_layout.addWidget(QLabel("Printhead movement (mm/s)"))
+        speeds_layout.addWidget(QLabel("Printhead speed — printing (mm/s)"))
+        self.print_speed = QDoubleSpinBox()
+        self.print_speed.setRange(1, 3000)
+        self.print_speed.setDecimals(1)
+        self.print_speed.setValue(300)
+        self.print_speed.setSuffix(" mm/s")
+        self.print_speed.valueChanged.connect(self.speed_changed)
+        speeds_layout.addWidget(self.print_speed)
+        speeds_layout.addWidget(QLabel("Movement speed — non-print travel (mm/s)"))
         self.move_speed = QDoubleSpinBox()
-        self.move_speed.setRange(1,500)
+        self.move_speed.setRange(1, 3000)
         self.move_speed.setDecimals(1)
-        self.move_speed.setValue(100)
+        self.move_speed.setValue(600)
         self.move_speed.setSuffix(" mm/s")
         self.move_speed.valueChanged.connect(self.speed_changed)
         speeds_layout.addWidget(self.move_speed)
+        speeds_layout.addWidget(QLabel("Print passes per 33.8 mm band (estimate)"))
+        self.print_passes = QSpinBox()
+        self.print_passes.setRange(1, 32)
+        self.print_passes.setValue(6)
+        self.print_passes.setToolTip(
+            "6 is an illustrative default; this is not read from the printer RIP.")
+        self.print_passes.valueChanged.connect(self.speed_changed)
+        speeds_layout.addWidget(self.print_passes)
         speeds_layout.addWidget(QLabel("Replay speed (× virtual time)"))
         self.replay_speed = QDoubleSpinBox()
         self.replay_speed.setRange(.1,1000)
@@ -295,6 +311,10 @@ class SimulationWidget(QWidget):
         self.duration_label = QLabel("00:00:00")
         timeline_row.addWidget(self.duration_label)
         layout.addLayout(timeline_row)
+        self.estimate_label = QLabel("Estimated total: -- · Elapsed: -- · Remaining: -- · Progress: 0.0%")
+        self.estimate_label.setWordWrap(True)
+        self.estimate_label.setStyleSheet("font-weight:600;")
+        layout.addWidget(self.estimate_label)
         self.detail = QLabel("Generate layer masks or open a completed job.json to simulate.")
         self.detail.setWordWrap(True)
         layout.addWidget(self.detail)
@@ -357,7 +377,9 @@ class SimulationWidget(QWidget):
             if not manifest.get("layers"):
                 raise ValueError("This job contains no completed layers.")
             plan = PrintSimulation(
-                manifest,move_speed_mm_s=self.move_speed.value())
+                manifest, move_speed_mm_s=self.move_speed.value(),
+                print_speed_mm_s=self.print_speed.value(),
+                passes=self.print_passes.value())
         except Exception as exc:
             self.detail.setText(f"Cannot open simulation job: {exc}")
             return
@@ -508,12 +530,20 @@ class SimulationWidget(QWidget):
         self.timeline.blockSignals(False)
         self.time_label.setText(format_sim_time(self.elapsed))
         self.duration_label.setText(format_sim_time(self.plan.total_seconds))
+        self.estimate_label.setText(
+            f"Estimated total: {format_sim_time(self.plan.total_seconds)}  ·  "
+            f"Elapsed: {format_sim_time(self.elapsed)}  ·  "
+            f"Remaining: {format_sim_time(frame.remaining_virtual_s)}  ·  "
+            f"Progress: {frame.progress_percent:.1f}%")
         hx,hy,hz = frame.head_position_mm
         self.detail.setText(
-            f"Printing layer {frame.layer_index+1:,}/{frame.layer_count:,} "
-            f"({frame.layer_progress*100:.1f}% of layer). "
-            f"Printhead X {hx:.1f}, Y {hy:.1f}, Z {hz:.2f} mm "
-            f"· {frame.rows_per_layer} simulated scan rows.")
+            f"Layer {frame.layer_index+1:,}/{frame.layer_count:,} · "
+            f"{frame.motion_kind.upper()} · "
+            f"{frame.layer_progress*100:.1f}% through layer. "
+            f"Head X {hx:.1f}, Y {hy:.1f}, Z {hz:.2f} mm · "
+            f"{frame.rows_per_layer} swath bands × {self.plan.passes} passes. "
+            f"Based on one i3200-U1 (69.1 × 59.5 × 35.6 mm); "
+            "3-head arrangement, real acceleration/UV curing not calibrated.")
         if update_viewport and self.viewport is not None and self._scene_ready:
             self.viewport.set_frame(frame)
             if frame.layer_index != self._wanted_texture_layer:
@@ -587,7 +617,9 @@ class SimulationWidget(QWidget):
         if self.plan is None:
             return
         normalized = self.elapsed / self.plan.total_seconds
-        self.plan.set_move_speed(float(value))
+        self.plan.set_print_speed(self.print_speed.value())
+        self.plan.set_move_speed(self.move_speed.value())
+        self.plan.set_passes(self.print_passes.value())
         self.elapsed = normalized * self.plan.total_seconds
         self._last_clock = time.monotonic()
         self._update_frame()
@@ -624,8 +656,9 @@ class SimulationWidget(QWidget):
             return
         self.pause()
         frame = self.plan.get_frame(self.elapsed/self.plan.total_seconds)
-        target = min(self.plan.count, max(0, frame.layer_index + int(amount)))
-        self.elapsed = (target / self.plan.count) * self.plan.total_seconds
+        target_fraction = self.plan.step_layer(
+            self.elapsed / self.plan.total_seconds, amount)
+        self.elapsed = target_fraction * self.plan.total_seconds
         self._update_frame()
 
     def _tick(self):
