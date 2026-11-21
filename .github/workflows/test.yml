@@ -81,3 +81,19 @@ jobs:
           if (-not (Test-Path (Join-Path $output 'job.json'))) {
             throw 'Portable worker did not write job manifest'
           }
+      - name: Smoke test separate simulation process on bundled Windows Python
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $root = (Get-Location).Path
+          $python = Join-Path $root 'runtime\python\python.exe'
+          $job = Join-Path $root 'workspace\jobs\ci_isolated\job.json'
+          if (-not (Test-Path $job)) { throw 'Missing generated offline job' }
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $env:UV3D_SIMULATION_TEST_EXIT_MS = '200'
+          $env:UV3D_SIMULATION_TEST_ABORT = '0'
+          & $python -m uv3d.simulation_runner --job $job --root $root --no-gpu
+          if ($LASTEXITCODE -ne 0) { throw "Bundled simulator process failed: $LASTEXITCODE" }
+          if (-not (Test-Path (Join-Path $root 'workspace\logs\uv3d-simulation-native.log'))) {
+            throw 'Simulator did not create native crash diagnostics'
+          }
