@@ -1,4 +1,5 @@
 import json
+import time
 
 import numpy as np
 import pytest
@@ -47,6 +48,14 @@ def test_triangle_clipping_exact():
     assert np.count_nonzero(np.isclose(clipped[:, 2], 1.0)) == 2
 
 
+def process_until(app, predicate, seconds=30):
+    deadline = time.monotonic() + seconds
+    while not predicate() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.01)
+    assert predicate(), "Background task did not complete within test timeout"
+
+
 def test_gui_height_and_slider_before_export(tmp_path):
     from PySide6.QtWidgets import QApplication
     from uv3d.app import MainWindow
@@ -57,6 +66,7 @@ def test_gui_height_and_slider_before_export(tmp_path):
     mesh.export(src)
     gui = MainWindow()
     gui.load_model_file(src)
+    process_until(app, lambda: gui.import_thread is None and gui.source_mesh is not None)
     assert gui.viewport.mesh is not None
     assert gui.slice_slider.isEnabled()
     gui.model_height.setValue(4)
@@ -66,14 +76,36 @@ def test_gui_height_and_slider_before_export(tmp_path):
     assert gui.layer_select.value() == 20
     assert gui.viewport.slice_z == pytest.approx((20 - 0.5) * 0.05)
     assert gui.job_data is None
-    # Rendering is part of the feature, not only its data model.
     gui.viewport.resize(660, 440)
     gui.viewport.show()
-    app.processEvents()
     gui.viewport._rebuild_cap()
-    assert gui.viewport._cap_polys, "Watertight box needs a colored slice cap."
+    process_until(app, lambda: bool(gui.viewport._cap_polys), seconds=15)
     image = gui.viewport.grab().toImage()
     assert image.width() > 0 and image.height() > 0
+    gui.close()
+
+
+def test_large_file_open_is_asynchronous_and_resize_reuses_preview(tmp_path):
+    from PySide6.QtWidgets import QApplication
+    from uv3d.app import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    dense = trimesh.creation.icosphere(subdivisions=5)
+    src = tmp_path / "dense.stl"
+    dense.export(src)
+    gui = MainWindow()
+    start = time.monotonic()
+    gui.load_model_file(src)
+    assert time.monotonic() - start < 1.5, "File loading blocked the user interface"
+    assert gui.import_thread is not None
+    process_until(app, lambda: gui.import_thread is None and gui.source_mesh is not None)
+    first_preview = gui.source_preview
+    assert gui.viewport.original_mesh is gui.source_mesh
+    t0 = time.monotonic()
+    gui.model_height.setValue(12)
+    assert time.monotonic() - t0 < 1.0, "Height change rebuilt the full mesh"
+    assert gui.source_preview is first_preview
+    assert gui.viewport.triangles.shape[0] <= gui.viewport.PREVIEW_TRIANGLES
     gui.close()
 
 
