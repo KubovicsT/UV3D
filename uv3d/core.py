@@ -106,10 +106,14 @@ def prepare_mesh(mesh: trimesh.Trimesh, target_height_mm: float | None = None) -
         factor = float(target_height_mm) / height
     else:
         factor = 1.0
-    result = mesh.copy()
-    result.apply_scale(factor)
-    result.apply_translation([0.0, 0.0, -float(result.bounds[0][2])])
-    return result
+    # Build scaled geometry directly rather than mesh.copy(), whose visual
+    # copier can invoke the optional SciPy face-to-vertex converter on PLY.
+    # The visual information remains read-only and shared with the source mesh.
+    vertices = np.asarray(mesh.vertices, dtype=np.float64) * factor
+    vertices[:, 2] -= float(mesh.bounds[0][2]) * factor
+    return trimesh.Trimesh(
+        vertices=vertices, faces=mesh.faces, visual=mesh.visual,
+        process=False, validate=False)
 
 
 def _face_colors(mesh: trimesh.Trimesh) -> np.ndarray:
