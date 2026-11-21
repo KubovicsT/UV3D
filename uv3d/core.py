@@ -157,7 +157,7 @@ def _paint_polygon_mask(polys, size: tuple[int, int], pxy) -> Image.Image:
     return mask
 
 
-def slice_model(filename: str | Path, output_dir: str | Path, settings: SliceSettings,
+def _slice_model_legacy(filename: str | Path, output_dir: str | Path, settings: SliceSettings,
                 on_progress=None, profile: MachineProfile | None = None) -> Path:
     """Generate numbered PNG masks and manifest; all operations are offline.
 
@@ -250,3 +250,11 @@ def slice_model(filename: str | Path, output_dir: str | Path, settings: SliceSet
     path = out / "job.json"
     path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return path
+
+
+
+def slice_model(filename: str | Path, output_dir: str | Path, settings: SliceSettings,
+                on_progress=None, profile: MachineProfile | None = None) -> Path:
+    """Default fast offline slicer; API and manifest kept compatible."""
+    from .fast_slicer import slice_fast
+    return slice_fast(filename, output_dir, settings, on_progress, profile)
