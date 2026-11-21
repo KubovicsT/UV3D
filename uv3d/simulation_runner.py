@@ -57,7 +57,7 @@ def main(argv=None):
     _LOG_HANDLE.write(f"Job: {opts.job}\nGPU mode: {not opts.no_gpu}\n")
     _LOG_HANDLE.flush()
 
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import Qt, QTimer
     from PySide6.QtWidgets import QApplication
     from .simulation_widget import SimulationWidget
 
@@ -68,6 +68,15 @@ def main(argv=None):
     widget.resize(1420, 860)
     widget.show()
     widget.load_job(opts.job)
+    # Controlled process-exit probes are used ONLY by CI to verify that
+    # a sudden child process death does not terminate the parent UV3D GUI.
+    test_exit = os.environ.get("UV3D_SIMULATION_TEST_EXIT_MS")
+    if test_exit is not None:
+        delay = max(1, int(test_exit))
+        if os.environ.get("UV3D_SIMULATION_TEST_ABORT") == "1":
+            QTimer.singleShot(delay, lambda: os._exit(91))
+        else:
+            QTimer.singleShot(delay, app.quit)
     _LOG_HANDLE.write("Simulation window opened\n")
     _LOG_HANDLE.flush()
     exit_code = int(app.exec())
