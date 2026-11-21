@@ -325,13 +325,23 @@ class PrintSimulation:
                         self.min_y,
                         min(y + head.offset_y_mm - head.swath_mm * .5
                             for head in active_heads))
+                    first_nozzle_x = min(h.offset_x_mm for h in active_heads)
+                    last_nozzle_x = max(h.offset_x_mm for h in active_heads)
+
+                    def trails_nozzles(lamp):
+                        # Use the LEADING EDGE of the illuminated footprint,
+                        # not merely its center, so even a very wide lamp
+                        # never shines in front of a still-printing nozzle.
+                        if forward:
+                            return (lamp.offset_x_mm + lamp.width_mm*.5
+                                    <= first_nozzle_x + 1e-9)
+                        return (lamp.offset_x_mm - lamp.width_mm*.5
+                                >= last_nozzle_x - 1e-9)
+
                     candidates = [
                         (i, lamp)
                         for i, lamp in enumerate(self.gantry_config.lamps)
-                        if lamp.enabled and (
-                            lamp.offset_x_mm < min(h.offset_x_mm for h in active_heads)
-                            if forward else
-                            lamp.offset_x_mm > max(h.offset_x_mm for h in active_heads))
+                        if lamp.enabled and trails_nozzles(lamp)
                     ]
                     if not candidates:
                         # If only a leading/central lamp is installed, do
@@ -365,12 +375,8 @@ class PrintSimulation:
                     selected = min(candidates, key=lamp_rank) if candidates else None
                     selected_i = selected[0] if selected else -1
                     selected_lamp = selected[1] if selected else None
-                    is_trailing = selected_lamp is not None and (
-                        selected_lamp.offset_x_mm <
-                            min(h.offset_x_mm for h in active_heads)
-                        if forward else
-                        selected_lamp.offset_x_mm >
-                            max(h.offset_x_mm for h in active_heads))
+                    is_trailing = (
+                        selected_lamp is not None and trails_nozzles(selected_lamp))
                     fits_y = (
                         selected_lamp is not None and
                         y + selected_lamp.offset_y_mm +
