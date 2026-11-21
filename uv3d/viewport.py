@@ -1,0 +1,294 @@
+"""Interactive slicer-style 3D viewport, software-rendered with Qt.
+
+Uses QPainter for portable rendering on Windows systems without additional
+graphics drivers/packages. Preview triangles are sampled for responsiveness;
+cross-sections are computed from the FULL transformed mesh.
+"""
+from __future__ import annotations
+
+import math
+
+import numpy as np
+import trimesh
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF
+from PySide6.QtWidgets import QWidget
+
+from .core import _face_colors, _polygons_from_segments
+
+
+def clip_triangle_below(triangle: np.ndarray, z: float) -> np.ndarray:
+    """Clip a 3D triangle to the half-space z <= cutoff."""
+    result = []
+    for i in range(3):
+        a, b = triangle[i - 1], triangle[i]
+        a_ok, b_ok = a[2] <= z, b[2] <= z
+        if a_ok != b_ok:
+            t = (z - a[2]) / (b[2] - a[2])
+            result.append(a + t * (b - a))
+        if b_ok:
+            result.append(b)
+    if not result:
+        return np.empty((0, 3), dtype=float)
+    return np.asarray(result, dtype=float)
+
+
+class ModelViewport(QWidget):
+    """Orbits with left drag, pans with right drag and zooms with wheel."""
+
+    PREVIEW_TRIANGLES = 7000
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(360, 320)
+        self.setMouseTracking(True)
+        self.setAttribute(Qt.WA_OpaquePaintEvent)
+        self.mesh = None
+        self.triangles = None
+        self.normals = None
+        self.face_colors = None
+        self.yaw = math.radians(37)
+        self.pitch = math.radians(27)
+        self.zoom = 1.0
+        self.pan = np.zeros(2, dtype=float)
+        self._last_pos = None
+        self._drag_button = None
+        self.slice_mode = False
+        self.slice_z = 0.0
+        self._cap_polys = []
+        self._cap_timer = QTimer(self)
+        self._cap_timer.setSingleShot(True)
+        self._cap_timer.setInterval(90)
+        self._cap_timer.timeout.connect(self._rebuild_cap)
+
+    def set_mesh(self, mesh: trimesh.Trimesh | None, reset_camera: bool = False) -> None:
+        self.mesh = mesh
+        self._cap_timer.stop()
+        self._cap_polys = []
+        if mesh is None:
+            self.triangles = self.normals = self.face_colors = None
+            self.update()
+            return
+        count = len(mesh.faces)
+        # Preview geometry is deliberately bounded. Full-resolution geometry
+        # still goes through slice_model and the exact cross-section routine.
+        ids = np.unique(np.linspace(0, count - 1, min(count, self.PREVIEW_TRIANGLES), dtype=np.int64))
+        self.triangles = np.asarray(mesh.vertices[mesh.faces[ids]], dtype=float)
+        self.normals = np.asarray(mesh.face_normals[ids], dtype=float)
+        self.face_colors = np.asarray(_face_colors(mesh)[ids], dtype=np.uint8)
+        if reset_camera:
+            self.reset_camera()
+        else:
+            self.set_layer_z(min(self.slice_z, float(mesh.extents[2])))
+        self.update()
+
+    def reset_camera(self):
+        self.yaw = math.radians(37)
+        self.pitch = math.radians(27)
+        self.zoom = 1.0
+        self.pan[:] = 0
+        self.update()
+
+    def set_slice_mode(self, active: bool) -> None:
+        self.slice_mode = bool(active)
+        if self.slice_mode:
+            self._cap_timer.start()
+        else:
+            self._cap_timer.stop()
+        self.update()
+
+    def set_layer_z(self, z_mm: float) -> None:
+        if self.mesh is None:
+            self.slice_z = 0
+            return
+        height = float(self.mesh.extents[2])
+        self.slice_z = float(np.clip(z_mm, 0.0, height))
+        if self.slice_mode:
+            self._cap_polys = []
+            self._cap_timer.start()
+        self.update()
+
+    def _rebuild_cap(self):
+        if self.mesh is None or not self.slice_mode:
+            return
+        z = min(max(self.slice_z, 1e-7), float(self.mesh.extents[2]) - 1e-7)
+        try:
+            segs, _ = trimesh.intersections.mesh_plane(
+                self.mesh, [0, 0, 1], [0, 0, z], return_faces=True)
+            self._cap_polys = _polygons_from_segments(segs)
+        except Exception:
+            self._cap_polys = []
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() in (Qt.LeftButton, Qt.MiddleButton, Qt.RightButton):
+            self._last_pos = event.position()
+            self._drag_button = event.button()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._last_pos is None:
+            return
+        delta = event.position() - self._last_pos
+        self._last_pos = event.position()
+        if self._drag_button == Qt.LeftButton:
+            self.yaw += delta.x() * 0.010
+            self.pitch = float(np.clip(self.pitch + delta.y() * 0.007, -1.35, 1.35))
+        else:
+            self.pan += np.array([delta.x(), delta.y()], dtype=float)
+        self.update()
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._last_pos = self._drag_button = None
+
+    def wheelEvent(self, event):
+        steps = event.angleDelta().y() / 120.0
+        self.zoom = float(np.clip(self.zoom * 1.14 ** steps, 0.10, 30.0))
+        self.update()
+        event.accept()
+
+    def _project(self, points):
+        pts = np.asarray(points, dtype=float).reshape(-1, 3)
+        if self.mesh is None:
+            return np.zeros((len(pts), 3), dtype=float)
+        dims = self.mesh.extents
+        bmin, bmax = self.mesh.bounds
+        mid = (bmin + bmax) * 0.5
+        middle = np.array([mid[0], mid[1], float(dims[2]) * 0.48])
+        xyz = pts - middle
+        cy, sy = math.cos(self.yaw), math.sin(self.yaw)
+        cp, sp = math.cos(self.pitch), math.sin(self.pitch)
+        sideways = cy * xyz[:, 0] - sy * xyz[:, 1]
+        into = sy * xyz[:, 0] + cy * xyz[:, 1]
+        vertical = sp * into - cp * xyz[:, 2]
+        depth = cp * into + sp * xyz[:, 2]
+        max_dim = max(float(max(dims[:2])), float(dims[2]) * 1.45, 1e-4)
+        scale = min(self.width(), self.height()) * 0.63 / max_dim * self.zoom
+        return np.column_stack((
+            self.width() * 0.5 + self.pan[0] + sideways * scale,
+            self.height() * 0.53 + self.pan[1] + vertical * scale,
+            depth,
+        ))
+
+    @staticmethod
+    def _polygon(points):
+        return QPolygonF([QPointF(float(x), float(y)) for x, y in points[:, :2]])
+
+    def _draw_grid(self, painter):
+        if self.mesh is None:
+            return
+        b0, b1 = self.mesh.bounds
+        dx, dy = self.mesh.extents[:2]
+        pad = max(2.0, float(max(dx, dy)) * .23)
+        xmin, xmax = float(b0[0] - pad), float(b1[0] + pad)
+        ymin, ymax = float(b0[1] - pad), float(b1[1] + pad)
+        corners = np.array([[xmin, ymin, 0], [xmax, ymin, 0],
+                            [xmax, ymax, 0], [xmin, ymax, 0]])
+        projected = self._project(corners)
+        painter.setPen(QPen(QColor("#425469"), 1.2))
+        painter.setBrush(QColor("#202d3c"))
+        painter.drawPolygon(self._polygon(projected))
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor("#324355"), 0.8))
+        for step in range(1, 10):
+            t = step / 10
+            x = xmin + t * (xmax - xmin)
+            y = ymin + t * (ymax - ymin)
+            for endpoints in (
+                [[x, ymin, 0], [x, ymax, 0]],
+                [[xmin, y, 0], [xmax, y, 0]]
+            ):
+                a, b = self._project(endpoints)
+                painter.drawLine(QPointF(*a[:2]), QPointF(*b[:2]))
+
+    def _paint_faces(self, painter, cutoff=None, ghost=False):
+        if self.triangles is None:
+            return
+        tri = self.triangles
+        # Use the view direction in world coordinates for culling and shading.
+        direction = np.array([math.sin(self.yaw) * math.cos(self.pitch),
+                              math.cos(self.yaw) * math.cos(self.pitch),
+                              math.sin(self.pitch)])
+        visible = self.normals @ direction > 0.0
+        if not np.any(visible):
+            visible = np.ones(len(tri), dtype=bool)
+        indices = np.flatnonzero(visible)
+        centers = tri[indices].mean(axis=1)
+        depth = self._project(centers)[:, 2]
+        painter.setPen(Qt.NoPen)
+        for idx in indices[np.argsort(depth)]:
+            face = tri[idx]
+            if cutoff is not None:
+                if face[:, 2].min() > cutoff:
+                    continue
+                if face[:, 2].max() > cutoff:
+                    face = clip_triangle_below(face, cutoff)
+                    if len(face) < 3:
+                        continue
+            pts = self._project(face)
+            if ghost:
+                fill = QColor(136, 162, 187, 39)
+            else:
+                light = max(0.0, float(np.dot(self.normals[idx], np.array([0.34, 0.48, 0.81]))))
+                brightness = .55 + .45 * light
+                rgb = (self.face_colors[idx].astype(float) * brightness).astype(int)
+                fill = QColor(int(rgb[0]), int(rgb[1]), int(rgb[2]), 255)
+            painter.setBrush(fill)
+            painter.drawPolygon(self._polygon(pts))
+
+    def _draw_cut_plane(self, painter):
+        if self.mesh is None:
+            return
+        b0, b1 = self.mesh.bounds
+        pad = max(0.5, max(self.mesh.extents[:2]) * 0.08)
+        a, b, z = b0[:2] - pad, b1[:2] + pad, self.slice_z
+        xy = np.array([[a[0], a[1], z], [b[0], a[1], z],
+                       [b[0], b[1], z], [a[0], b[1], z]])
+        painter.setBrush(QColor(27, 179, 211, 19))
+        painter.setPen(QPen(QColor(38, 204, 229, 95), 1.5, Qt.DashLine))
+        painter.drawPolygon(self._polygon(self._project(xy)))
+
+    def _draw_slice_cap(self, painter):
+        if not self._cap_polys:
+            return
+        path = QPainterPath()
+        path.setFillRule(Qt.OddEvenFill)
+        for poly in self._cap_polys:
+            for ring in [poly.exterior, *poly.interiors]:
+                z = np.full(len(ring.coords), self.slice_z)
+                xy = np.asarray(ring.coords)
+                pts = np.column_stack((xy, z))
+                path.addPolygon(self._polygon(self._project(pts)))
+                path.closeSubpath()
+        painter.setPen(QPen(QColor(255, 191, 79, 225), 1.4))
+        painter.setBrush(QColor(255, 177, 59, 165))
+        painter.drawPath(path)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#131b27"))
+        if self.mesh is None:
+            painter.setPen(QColor("#a8bbd0"))
+            painter.setFont(QFont("Segoe UI", 13))
+            painter.drawText(self.rect(), Qt.AlignCenter, "Open a model to explore it in 3D")
+            painter.end()
+            return
+        self._draw_grid(painter)
+        if self.slice_mode:
+            self._paint_faces(painter, ghost=True)
+            self._draw_cut_plane(painter)
+            self._paint_faces(painter, cutoff=self.slice_z)
+            self._draw_slice_cap(painter)
+        else:
+            self._paint_faces(painter)
+        painter.setPen(QColor("#bed3e5"))
+        painter.setFont(QFont("Segoe UI", 10))
+        painter.drawText(QRectF(14, 12, self.width() - 26, 30),
+                         "LMB orbit  •  RMB/MMB pan  •  Wheel zoom")
+        if self.slice_mode:
+            painter.setPen(QColor("#f9c06c"))
+            painter.drawText(QRectF(14, self.height()-40, self.width()-25, 26),
+                             f"SLICE  |  Z {self.slice_z:.3f} mm  |  Amber: selected layer; gray: full model")
+        painter.end()
