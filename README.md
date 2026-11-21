@@ -29,7 +29,7 @@ UV3D targets the Gongzheng H6090EI (three Epson i3200 heads, CMYK/white/varnish)
 - Read-only machine profile: 600 x 900 mm nominal bed, 3 heads, 4,841.455 Z motor pulses/mm (observed factory configuration).
 - **Update** button: portable Git fetches origin/main, fast-forwards only, refreshes folder-local dependencies if necessary, then restarts. No UV3D releases.
 
-**Not implemented:** PrintExp .prt export, RIP white/varnish channel mapping, hardware API, Z movement, completion feedback, UV curing and real ink thickness, accurate UV textures, actual full-color printing, supports, or automatic printer calibration. PNGs are geometric **proposals**, not printer-ready files. Never send these files directly to a head controller.
+**Not implemented:** PrintExp .prt export, RIP white/varnish or soluble-support channel mapping, hardware API, Z movement, completion feedback, UV curing and real ink thickness, accurate UV textures, verified full-color printing, water-soluble support deposition, or automatic printer calibration. PNGs are geometric **proposals**, not printer-ready files. Never send these files directly to a head controller.
 
 ## Windows install — single application folder
 
