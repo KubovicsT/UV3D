@@ -156,7 +156,9 @@ def test_3d_printhead_is_a_colored_cuboid_and_material_shader_has_alpha():
     assert float(head["position"][:,2].min())==pytest.approx(5)
     assert len(np.unique(head["color"],axis=0))>=3
     assert "uSupportTint.a" in SIM_LAYER_FRAGMENT
-    assert "uRowProgress" in SIM_LAYER_FRAGMENT
+    assert "uModelProgress" in SIM_LAYER_FRAGMENT
+    assert "uSupportProgress" in SIM_LAYER_FRAGMENT
+    assert "uScanDirection" in SIM_LAYER_FRAGMENT
     assert "uColor" in SIM_LAYER_FRAGMENT
 
 
