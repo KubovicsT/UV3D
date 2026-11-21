@@ -6,6 +6,7 @@ rather than a calibrated Gongzheng print strategy. No printer communication.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -26,7 +27,8 @@ from .simulation_engine import (
 )
 from .support_surface import build_support_surface
 
-GPU_AVAILABLE = (sys.platform == "win32")
+GPU_AVAILABLE = (sys.platform == "win32" and
+                 os.environ.get("QT_QPA_PLATFORM", "").lower() not in ("offscreen", "minimal"))
 if GPU_AVAILABLE:
     from .simulation_viewport import SimulationViewport
 else:
@@ -160,6 +162,7 @@ class SimulationWidget(QWidget):
         self._texture_thread = self._texture_worker = None
         self._deferred_job = None
         self._pending_model = None
+        self._scene_ready = False
         self._support_color = QColor("#a86edc")
         self._model_color = QColor("#c8c4b5")
 
@@ -200,8 +203,17 @@ class SimulationWidget(QWidget):
         nav = QHBoxLayout()
         prev_btn = QPushButton("◀ Layer")
         next_btn = QPushButton("Layer ▶")
-        prev_btn.clicked.connect(lambda: self.step_layer(-1))
-        next_btn.clicked.connect(lambda: self.step_layer(1))
+        owner = weakref.ref(self)
+        def step_previous(checked=False, ref=owner):
+            widget = ref()
+            if widget is not None:
+                widget.step_layer(-1)
+        def step_next(checked=False, ref=owner):
+            widget = ref()
+            if widget is not None:
+                widget.step_layer(1)
+        prev_btn.clicked.connect(step_previous)
+        next_btn.clicked.connect(step_next)
         nav.addWidget(prev_btn)
         nav.addWidget(next_btn)
         group_layout.addLayout(nav)
@@ -327,6 +339,12 @@ class SimulationWidget(QWidget):
         self.manifest = manifest
         self.plan = plan
         self.job_path = job_path
+        self._scene_ready = False
+        if self.viewport is not None:
+            # Do not draw the previous model while a different job is loading.
+            self.viewport.frame = None
+            self.viewport.mesh = None
+            self.viewport.update()
         self.elapsed = 0.0
         self._loaded_texture_layer = -1
         self._wanted_texture_layer = -1
@@ -368,6 +386,7 @@ class SimulationWidget(QWidget):
         if self.viewport is not None and mesh is not None and payload is not None:
             self.viewport.set_simulation_scene(mesh,payload,self.manifest)
             self.viewport.set_support_surface(surface.triangles)
+            self._scene_ready = True
             self.viewport.set_support_tint(
                 self._support_color.getRgb()[:3],self.support_opacity.value()/100)
             # Use a fallback color for STL, whose standard format has no
@@ -454,7 +473,7 @@ class SimulationWidget(QWidget):
             f"({frame.layer_progress*100:.1f}% of layer). "
             f"Printhead X {hx:.1f}, Y {hy:.1f}, Z {hz:.2f} mm "
             f"· {frame.rows_per_layer} simulated scan rows.")
-        if self.viewport is not None and self.viewport.original_mesh is not None:
+        if self.viewport is not None and self._scene_ready:
             self.viewport.set_frame(frame)
             if frame.layer_index != self._wanted_texture_layer:
                 self._request_texture(frame.layer_index)
