@@ -19,7 +19,7 @@ jobs:
           python-version: '3.12'
       - name: Install Linux Qt and shader validation libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 libxcb-cursor0 glslang-tools xvfb xauth libgl1-mesa-dri
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 glslang-tools xvfb xauth libgl1-mesa-dri libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0
       - name: Install test dependencies
         run: python -m pip install -r requirements.txt pytest
       - name: Test slicer and GUI startup
