@@ -76,3 +76,20 @@ def test_supp_camera_controls_and_presets():
     assert zoom(1, 1) > 1
     assert zoom(1, -1) < 1
     assert set(PRESETS) == {"Isometric", "Top", "Front", "Right"}
+
+
+def test_compatibility_worker_can_retry_after_accelerated_failure(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    src = tmp_path / "cube.stl"
+    trimesh.creation.box(extents=(4, 4, 1)).export(src)
+    worker = SlicerController(tmp_path)
+    succeeded = []
+    failures = []
+    worker.succeeded.connect(succeeded.append)
+    worker.failed.connect(lambda reason, log: failures.append((reason, log)))
+    assert worker.start(src, SliceSettings(layer_mm=1, dpi=72),
+                        compatibility_mode=True)
+    until(app, lambda: not worker.running)
+    assert not failures
+    assert succeeded and Path(succeeded[0]).is_file()
+    assert "Mode: compatibility" in worker.log_path.read_text(encoding="utf-8")
