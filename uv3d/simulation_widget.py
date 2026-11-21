@@ -163,6 +163,7 @@ class SimulationWidget(QWidget):
         self._deferred_job = None
         self._pending_model = None
         self._scene_ready = False
+        self._close_when_idle = False
         self._support_color = QColor("#a86edc")
         self._model_color = QColor("#c8c4b5")
 
@@ -437,6 +438,9 @@ class SimulationWidget(QWidget):
 
     def _asset_thread_finished(self):
         self._asset_thread = self._asset_worker = None
+        if self._close_when_idle:
+            QTimer.singleShot(0, self.close)
+            return
         if self._deferred_job is not None:
             args = self._deferred_job
             self._deferred_job = None
@@ -490,6 +494,9 @@ class SimulationWidget(QWidget):
 
     def _texture_thread_finished(self):
         self._texture_thread = self._texture_worker = None
+        if self._close_when_idle:
+            QTimer.singleShot(0, self.close)
+            return
         if (not self.timeline.isSliderDown()
                 and self._loaded_texture_layer != self._wanted_texture_layer):
             self._texture_delay.start(100)
@@ -633,3 +640,22 @@ class SimulationWidget(QWidget):
     def show_future_changed(self,enabled):
         if self.viewport is not None:
             self.viewport.set_show_future(enabled)
+
+
+    def closeEvent(self, event):
+        """Wait for IO/mesh Qt workers before destroying their QThread objects.
+
+        Destroying a running QThread is a native Qt fatal error and used to
+        terminate the whole application silently. In a separate child process
+        it still matters for clean shutdown and complete diagnostic logs.
+        """
+        self.pause()
+        self._texture_delay.stop()
+        self._scrub_timer.stop()
+        if self.busy:
+            self._close_when_idle = True
+            self.detail.setText("Closing simulation after active image load finishes...")
+            event.ignore()
+            return
+        self._close_when_idle = False
+        event.accept()
