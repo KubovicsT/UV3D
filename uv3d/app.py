@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 from .core import MachineProfile, SliceSettings, load_mesh
 from .gui_slicer import SlicerController
+from .diagnostics import install_gui_diagnostics
 from .viewport import ModelViewport as SoftwareModelViewport, build_preview_geometry
 
 # Interactive Windows sessions render the ORIGINAL mesh on the GPU.
@@ -632,6 +633,7 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    install_gui_diagnostics(WORKSPACE)
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     window = MainWindow()
