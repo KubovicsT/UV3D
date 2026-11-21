@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 from .core import MachineProfile, SliceSettings, load_mesh
 from .gui_slicer import SlicerController
+from .support_preview import build_support_wireframe
 from .diagnostics import install_gui_diagnostics
 from .viewport import ModelViewport as SoftwareModelViewport, build_preview_geometry
 
@@ -70,6 +71,22 @@ class ImportWorker(QObject):
             self.error.emit(f"{type(exc).__name__}: {exc}")
 
 
+class SupportPreviewWorker(QObject):
+    ready = Signal(str, object)
+    error = Signal(str)
+
+    def __init__(self, job_path: str | Path):
+        super().__init__()
+        self.job_path = str(job_path)
+
+    def run(self):
+        try:
+            lines = build_support_wireframe(self.job_path)
+            self.ready.emit(self.job_path, lines)
+        except Exception as exc:
+            self.error.emit(f"{type(exc).__name__}: {exc}")
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -90,6 +107,8 @@ class MainWindow(QMainWindow):
         self.slicer.failed.connect(self.on_slicer_failed)
         self.import_thread = None
         self.import_worker = None
+        self.support_preview_thread = None
+        self.support_preview_worker = None
         self.source_preview = None
         self.sim_position = 0
         self.sim_timer = QTimer(self)
@@ -237,6 +256,12 @@ class MainWindow(QMainWindow):
         self.slice_checkbox.setChecked(True)
         self.slice_checkbox.toggled.connect(self.on_slice_mode_changed)
         top.addWidget(self.slice_checkbox)
+        self.show_support = QCheckBox("Support casing")
+        self.show_support.setChecked(True)
+        self.show_support.setEnabled(False)
+        self.show_support.setToolTip(
+            "After export, show sampled purple support contours around the model.")
+        top.addWidget(self.show_support)
         reset = QPushButton("Reset view")
         reset.clicked.connect(self.reset_view)
         top.addWidget(reset)
@@ -244,6 +269,7 @@ class MainWindow(QMainWindow):
 
         view_row = QHBoxLayout()
         self.viewport = ModelViewport()
+        self.show_support.toggled.connect(self.viewport.set_show_support_preview)
         if hasattr(self.viewport, "opengl_failed"):
             self.viewport.opengl_failed.connect(self.report_opengl_failure)
         view_row.addWidget(self.viewport, stretch=1)
@@ -522,6 +548,9 @@ class MainWindow(QMainWindow):
             return
         self.job_data = None
         self.job_path = None
+        self.viewport.set_support_preview_lines(None)
+        self.viewport.set_show_support_preview(False)
+        self.show_support.setEnabled(False)
         self.output_label.setText("Model/settings changed — regenerate masks.")
         self.preview_label.setPixmap(QPixmap())
         self.preview_label.setText("Export masks to preview updated channels")
@@ -600,10 +629,50 @@ class MainWindow(QMainWindow):
         for warning in self.job_data["warnings"]:
             self.log.appendPlainText("WARNING: " + warning)
         self.sim_detail.setText(f"Loaded offline job: {n} layers")
+        self.viewport.set_support_preview_lines(None)
+        support = self.job_data.get("support", {})
+        if support.get("enabled"):
+            self.show_support.setEnabled(
+                bool(getattr(ModelViewport, "FULL_RESOLUTION", False)))
+            if self.show_support.isEnabled():
+                self.start_support_preview(self.job_path)
 
     def export_failed(self, problem: str):
         self.log.appendPlainText("ERROR: " + problem)
         QMessageBox.warning(self, "Slice export failed", problem)
+
+    def start_support_preview(self, job_path: Path):
+        if self.support_preview_thread is not None:
+            return
+        thread = QThread(self)
+        worker = SupportPreviewWorker(job_path)
+        self.support_preview_thread = thread
+        self.support_preview_worker = worker
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.ready.connect(self.support_preview_ready)
+        worker.error.connect(self.support_preview_failed)
+        worker.ready.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self.support_preview_thread_finished)
+        self.log.appendPlainText("Preparing sparse 3D support wireframe in background...")
+        thread.start()
+
+    def support_preview_ready(self, path, lines):
+        if self.job_path is not None and str(self.job_path) == path:
+            self.viewport.set_support_preview_lines(lines)
+            self.viewport.set_show_support_preview(self.show_support.isChecked())
+            self.log.appendPlainText(
+                f"3D support wireframe ready: {len(lines) // 2:,} line segments.")
+
+    def support_preview_failed(self, problem):
+        self.log.appendPlainText("3D support wireframe unavailable: " + problem)
+
+    def support_preview_thread_finished(self):
+        self.support_preview_thread = None
+        self.support_preview_worker = None
 
     def show_slice(self, *_):
         if not self.job_data or not self.job_path:
@@ -660,6 +729,12 @@ class MainWindow(QMainWindow):
             self.sim_timer.stop()
 
     def closeEvent(self, event):
+        if (self.support_preview_thread is not None
+                and self.support_preview_thread.isRunning()):
+            QMessageBox.information(self, "Support preview preparing",
+                                    "Let the support wireframe finish loading before closing.")
+            event.ignore()
+            return
         if self.import_thread is not None and self.import_thread.isRunning():
             QMessageBox.warning(self, "Import in progress", "Wait for the import to finish before closing UV3D.")
             event.ignore()
