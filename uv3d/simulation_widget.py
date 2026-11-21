@@ -486,6 +486,7 @@ class SimulationWidget(QWidget):
         # Avoid stale layers when the user scrubs the timeline rapidly.
         if index == self._wanted_texture_layer:
             self._loaded_texture_layer = index
+            self._log_simulation_checkpoint("texture-upload-request")
             self.viewport.set_layer_bitmaps(index,*arrays)
 
     def _texture_failed(self,job_path,index,problem):
@@ -521,7 +522,31 @@ class SimulationWidget(QWidget):
             if frame.layer_index != self._wanted_texture_layer:
                 self._request_texture(frame.layer_index)
 
+    def _log_simulation_checkpoint(self, stage):
+        # A single flushed, human-readable record survives even if Windows
+        # forcibly terminates the viewer before Python can display an error.
+        # Write only on drag start/end and GPU texture handoff, not every tick.
+        if self.job_path is None:
+            return
+        try:
+            from datetime import datetime
+            folder = self.root / "workspace" / "logs"
+            folder.mkdir(parents=True, exist_ok=True)
+            with (folder / "uv3d-simulation-last-seek.log").open(
+                    "a", encoding="utf-8", buffering=1) as stream:
+                stream.write(
+                    f"{datetime.now().isoformat(timespec='milliseconds')} "
+                    f"{stage} | tick={self.timeline.value()} "
+                    f"layer={self._wanted_texture_layer+1} "
+                    f"loaded={self._loaded_texture_layer+1} "
+                    f"asset_loading={self._asset_thread is not None} "
+                    f"texture_loading={self._texture_thread is not None}\n"
+                )
+        except OSError:
+            pass
+
     def timeline_pressed(self):
+        self._log_simulation_checkpoint("drag-start")
         # Pause playback to avoid timer races with user-controlled seeking.
         self.pause()
         self._texture_delay.stop()
@@ -529,6 +554,7 @@ class SimulationWidget(QWidget):
         self._scrub_pending = False
 
     def timeline_released(self):
+        self._log_simulation_checkpoint("drag-release")
         # Only decode the final layer after the user finishes the drag.
         self._scrub_timer.stop()
         self._scrub_pending = False
