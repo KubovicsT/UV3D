@@ -139,3 +139,44 @@ def test_gantry_ui_edit_material_lamp_size_and_persist_without_reloading(tmp_pat
     assert len(load_gantry(tmp_path).lamps) == 3
     assert observed
     widget.close()
+
+
+
+def test_staggered_head_y_offsets_extend_bands_and_shift_material_rows(example_job):
+    aligned = GantryConfig(
+        heads=[HeadConfig("Model","white"),HeadConfig("Support","support")],
+        lamps=[])
+    staggered = GantryConfig(heads=[
+        HeadConfig("Model","white",offset_y_mm=20),
+        HeadConfig("Support","support",offset_y_mm=-20),
+    ], lamps=[])
+    base = PrintSimulation(example_job, gantry_config=aligned)
+    plan = PrintSimulation(example_job, gantry_config=staggered)
+    assert plan.rows > base.rows
+    assert plan.total_seconds > base.total_seconds
+    print_i = next(i for i,s in enumerate(plan.segments) if s.kind == "print")
+    seg = plan.segments[print_i]
+    before = plan._segment_end_s[print_i-1] if print_i else 0
+    frame = plan.get_frame((before + seg.duration_s*.5) / plan.total_seconds)
+    assert frame.model_row_shift > frame.support_row_shift
+    assert frame.raster_band_scale < plan.rows
+
+
+def test_editing_gantry_in_simulator_updates_eta_without_reexport(tmp_path, example_job):
+    from uv3d.simulation_widget import SimulationWidget
+    app = QApplication.instance() or QApplication([])
+    job_dir = tmp_path / "workspace" / "jobs" / "simulate"
+    job_dir.mkdir(parents=True)
+    job = job_dir / "job.json"
+    job.write_text(json.dumps(example_job), encoding="utf-8")
+    sim = SimulationWidget(tmp_path, gpu_enabled=False)
+    sim.set_gantry_config(GantryConfig(
+        heads=[HeadConfig("White","white")], lamps=[]))
+    sim.load_job(job)
+    base = sim.plan.total_seconds
+    sim.set_gantry_config(GantryConfig(
+        heads=[HeadConfig("White","white")],
+        lamps=[LampConfig("UV", 70, 0, 12, 10)]))
+    assert sim.plan.total_seconds > base
+    assert "UV lamps" in sim.detail.text()
+    sim.close()
