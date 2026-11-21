@@ -65,8 +65,11 @@ out vec4 outColor;
 uniform bool uSlice;
 uniform float uCutZ;
 uniform int uMode;
+uniform vec4 uSupportTint;
+uniform vec3 uFallbackModelTint;
+uniform bool uUseFallbackModelTint;
 void main() {
-    if (uMode == 0 && uSlice && vWorld.z > uCutZ + 0.00001)
+    if ((uMode == 0 || uMode == 5) && uSlice && vWorld.z > uCutZ + 0.00001)
         discard;
     if (uMode == 1) {
         outColor = vec4(0.43, 0.58, 0.74, 0.16);
@@ -74,10 +77,13 @@ void main() {
         outColor = vec4(1.0, 0.67, 0.19, 1.0);
     } else if (uMode == 4) {
         outColor = vColor;
+    } else if (uMode == 5) {
+        outColor = uSupportTint;
     } else {
         vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
         float light = 0.52 + 0.48 * abs(dot(N, normalize(vec3(0.3, 0.5, 0.8))));
-        outColor = vec4(vColor.rgb * light, 1.0);
+        vec3 baseColor = uUseFallbackModelTint ? uFallbackModelTint : vColor.rgb;
+        outColor = vec4(baseColor * light, 1.0);
     }
 }
 """
