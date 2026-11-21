@@ -67,6 +67,9 @@ class SimulationFrame:
     lamp_active: bool = False
     active_lamp_index: int = -1
     curing: bool = False
+    model_row_shift: float = 0.0
+    support_row_shift: float = 0.0
+    raster_band_scale: float = 1.0
 
 
 class PrintSimulation:
@@ -123,6 +126,10 @@ class PrintSimulation:
             raise ValueError("Invalid simulation geometry.")
         self.rows = max(1, math.ceil(self.depth / self.scan_pitch_mm))
         self.row_step = self.depth / self.rows
+        self._model_head = self.gantry_config.heads[0]
+        self._support_head = self.gantry_config.heads[0]
+        self._min_head_dy = 0.0
+        self._gantry_top_y = self.max_y
         self.passes = self._validate_passes(passes)
         self.print_mode = self._validate_print_mode(print_mode)
         self.print_speed_mm_s = self._validate_speed(print_speed_mm_s)
@@ -216,6 +223,20 @@ class PrintSimulation:
         elapsed_print = 0.0
         active_heads = [h for h in self.gantry_config.heads if h.enabled]
         active_lamps = [l for l in self.gantry_config.lamps if l.enabled]
+        self._model_head = next(
+            (h for h in active_heads if h.material == self._body_material),
+            active_heads[0])
+        self._support_head = next(
+            (h for h in active_heads if h.material == "support"),
+            active_heads[0])
+        self._min_head_dy = min(h.offset_y_mm for h in active_heads)
+        max_dy = max(h.offset_y_mm for h in active_heads)
+        # Enlarge the Y sweep if heads are staggered along Y. A head behind
+        # the reference printhead must still reach both raster edges.
+        gantry_depth = self.depth + max_dy - self._min_head_dy
+        self.rows = max(1, math.ceil(gantry_depth / self.scan_pitch_mm))
+        self.row_step = gantry_depth / self.rows
+        self._gantry_top_y = self.max_y - self._min_head_dy
         # Head offsets determine how far the gantry itself must travel for
         # every installed material head to cover the full XY raster.
         left = (self.min_x - max(h.offset_x_mm for h in active_heads)
@@ -223,7 +244,7 @@ class PrintSimulation:
         right = (self.min_x + self.width
                  - min(h.offset_x_mm for h in active_heads)
                  + self.overscan_mm)
-        y_first = self.max_y - self.row_step * 0.5
+        y_first = self._gantry_top_y - self.row_step * 0.5
         last_xyz = (left, y_first,
                     float(self.layers[0]["target_stack_height_mm"]) + self.head_clearance_mm)
 
@@ -253,7 +274,7 @@ class PrintSimulation:
             z = height + self.head_clearance_mm
             print_seconds = 0.0
             for band in range(self.rows):
-                y = self.max_y - (band + .5) * self.row_step
+                y = self._gantry_top_y - (band + .5) * self.row_step
                 for pass_index in range(self.passes):
                     # Bidirectional: alternate print direction EVERY pass,
                     # including the transition between adjacent swath bands.
@@ -341,14 +362,6 @@ class PrintSimulation:
         if segment.printing:
             direction = 1 if segment.end_xyz[0] > segment.start_xyz[0] else -1
             raster_left = self.min_x
-            active_heads = [h for h in self.gantry_config.heads if h.enabled]
-            preferred = next(
-                (h for h in active_heads
-                 if h.material == self._body_material), active_heads[0])
-            support_head = next(
-                (h for h in active_heads if h.material == "support"),
-                active_heads[0])
-
             def scan_for(head):
                 physical_x = xyz[0] + head.offset_x_mm
                 if direction > 0:
@@ -357,8 +370,8 @@ class PrintSimulation:
                     p = (raster_left + self.width - physical_x) / self.width
                 return max(0.0, min(1.0, p))
 
-            model_fraction = scan_for(preferred)
-            support_fraction = scan_for(support_head)
+            model_fraction = scan_for(self._model_head)
+            support_fraction = scan_for(self._support_head)
             scan_fraction = model_fraction
             completed_passes = segment.pass_index
         else:
@@ -401,6 +414,11 @@ class PrintSimulation:
             lamp_active=(segment.printing or segment.curing),
             active_lamp_index=segment.lamp_index,
             curing=segment.curing,
+            model_row_shift=(self._model_head.offset_y_mm -
+                             self._min_head_dy) / self.row_step,
+            support_row_shift=(self._support_head.offset_y_mm -
+                               self._min_head_dy) / self.row_step,
+            raster_band_scale=self.depth / self.row_step,
         )
 
     def step_layer(self, timeline_fraction: float, amount: int) -> float:
