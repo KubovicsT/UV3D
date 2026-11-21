@@ -95,8 +95,15 @@ def test_export_solid_body_conformal_support_and_savings(tmp_path, fn):
     assert stats["support_volume_mm3"] > 0
     assert 0 < stats["saving_vs_cube_percent"] < 100
     # Stem is a filled solid part, not a perimeter-only wall.
-    base_mid = model[0][model[0].shape[0] // 2, model[0].shape[1] // 2]
-    assert base_mid == 255
+    # The base stem occupies x=0,y=0; the full raster is centered on the
+    # *combined* overhanging model, so raster center is not stem center.
+    x_mm, y_mm = 0.0, 0.0
+    extent = meta["model_bounds_mm"]
+    ppm = meta["settings"]["dpi"] / 25.4
+    margin = meta["effective_raster_margin_mm"]
+    col = round((x_mm - extent[0][0] + margin) * ppm)
+    row = round((extent[1][1] - y_mm + margin) * ppm)
+    assert model[0][row, col] == 255
     # Support never overlaps the solid model.
     for part, sacrificial in zip(model, support):
         assert not np.any((part > 0) & (sacrificial > 0))
