@@ -17,6 +17,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
 from .core import _face_colors, _polygons_from_segments
+from .navigation import orbit as supp_orbit, zoom as supp_zoom, preset as camera_preset
 
 
 def clip_triangle_below(triangle: np.ndarray, z: float) -> np.ndarray:
@@ -166,8 +167,7 @@ class ModelViewport(QWidget):
         self.triangles = None
         self.normals = None
         self.face_colors = None
-        self.yaw = math.radians(37)
-        self.pitch = math.radians(27)
+        self.yaw, self.pitch = camera_preset('Isometric')
         self.zoom = 1.0
         self.pan = np.zeros(2, dtype=float)
         self._last_pos = None
@@ -224,9 +224,16 @@ class ModelViewport(QWidget):
         self.update()
 
     def reset_camera(self):
-        self.yaw = math.radians(37)
-        self.pitch = math.radians(27)
+        self.yaw, self.pitch = camera_preset('Isometric')
         self.zoom = 1.0
+        self.pan[:] = 0
+        self.update()
+
+    def set_view_preset(self, name):
+        if name == 'Fit model':
+            self.reset_camera()
+            return
+        self.yaw, self.pitch = camera_preset(name)
         self.pan[:] = 0
         self.update()
 
@@ -309,11 +316,12 @@ class ModelViewport(QWidget):
             return
         delta = event.position() - self._last_pos
         self._last_pos = event.position()
-        if self._drag_button == Qt.LeftButton:
-            self.yaw += delta.x() * 0.010
-            self.pitch = float(np.clip(self.pitch + delta.y() * 0.007, -1.35, 1.35))
-        else:
+        if self._drag_button == Qt.RightButton:
+            self.yaw, self.pitch = supp_orbit(self.yaw, self.pitch, delta.x(), delta.y())
+        elif self._drag_button == Qt.MiddleButton:
             self.pan += np.array([delta.x(), delta.y()], dtype=float)
+        else:
+            return  # left click reserved for selection and 3D manipulation
         self.update()
         event.accept()
 
@@ -322,7 +330,7 @@ class ModelViewport(QWidget):
 
     def wheelEvent(self, event):
         steps = event.angleDelta().y() / 120.0
-        self.zoom = float(np.clip(self.zoom * 1.14 ** steps, 0.10, 30.0))
+        self.zoom = supp_zoom(self.zoom, steps)
         self.update()
         event.accept()
 
@@ -445,7 +453,7 @@ class ModelViewport(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), QColor("#131b27"))
+        painter.fillRect(self.rect(), QColor("#363940"))
         if self.mesh is None:
             painter.setPen(QColor("#a8bbd0"))
             painter.setFont(QFont("Segoe UI", 13))
@@ -464,7 +472,7 @@ class ModelViewport(QWidget):
         painter.setPen(QColor("#bed3e5"))
         painter.setFont(QFont("Segoe UI", 10))
         painter.drawText(QRectF(14, 12, self.width() - 26, 30),
-                         "LMB orbit  •  RMB/MMB pan  •  Wheel zoom")
+                         "RMB orbit  •  MMB pan  •  Wheel zoom")
         if self.slice_mode:
             painter.setPen(QColor("#f9c06c"))
             painter.drawText(QRectF(14, self.height()-40, self.width()-25, 26),
