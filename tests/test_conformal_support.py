@@ -188,3 +188,42 @@ def test_bad_support_settings_rejected():
         SliceSettings(support_casing_mm=6).validate()
     with pytest.raises(ValueError, match="Support enabled"):
         SliceSettings(support_enabled="yes").validate()
+
+
+
+@pytest.mark.parametrize("slicer", [slice_model, _slice_model_legacy])
+def test_solid_support_top_cap_covers_all_model_projections(tmp_path, slicer):
+    """Model top and protrusions need sacrificial material ABOVE the model too.
+
+    Top cap covers the *union of all lower model/support XY columns*, not
+    only the final model slice. No cap pixels may overlap the solid body.
+    """
+    mesh = trimesh.creation.box(extents=[6, 4, 1])
+    path = tmp_path / "roof.stl"
+    mesh.export(path)
+    result = slicer(path, tmp_path / "roof_layers",
+                    SliceSettings(layer_mm=.5, dpi=100, support_enabled=True,
+                                  support_casing_mm=.6, support_top_cap_mm=.5))
+    manifest, model, support = _masks(result)
+    assert len(manifest["layers"]) == 3
+    assert manifest["storage_plan"]["png_files"] == 12
+    cap = manifest["layers"][-1]
+    assert cap["support_only_top_cap"]
+    assert cap["contains_geometry"] is False
+    assert cap["target_stack_height_mm"] == pytest.approx(1.5)
+    assert manifest["support"]["statistics"]["top_cap_layers"] == 1
+    assert not np.any(model[-1])
+    assert np.count_nonzero(support[-1]) > 0
+    # Full XY envelope at the plate is reproduced as the roof.
+    np.testing.assert_array_equal(
+        support[-1] > 0, ((support[0] > 0) | (model[0] > 0)))
+    for part, sacrificial in zip(model, support):
+        assert not np.any((part > 0) & (sacrificial > 0))
+    assert support[-1].sum() >= support[-2].sum()
+
+
+def test_support_top_cap_validation():
+    with pytest.raises(ValueError, match="top-cap"):
+        SliceSettings(support_top_cap_mm=-.1).validate()
+    with pytest.raises(ValueError, match="top-cap"):
+        SliceSettings(support_top_cap_mm=5.1).validate()
