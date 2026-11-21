@@ -121,3 +121,17 @@ def test_detailed_model_preview_keeps_surface_and_colors():
     assert np.allclose(colors[:, 0], 80)
     assert np.max(triangles[:, 2]) > 0.85
     assert np.min(triangles[:, 2]) < -0.85
+
+
+def test_native_preview_respects_nonuniform_face_colors():
+    from uv3d.viewport import build_preview_geometry
+    sphere = trimesh.creation.icosphere(subdivisions=4)
+    base = np.tile(np.array([40, 100, 220, 255], dtype=np.uint8),
+                   (len(sphere.faces), 1))
+    base[sphere.triangles_center[:, 0] > 0] = [220, 80, 40, 255]
+    sphere.visual.face_colors = base
+    tris, normals, colors = build_preview_geometry(sphere, max_faces=600)
+    assert len(tris) <= 600
+    assert len(colors) == len(normals) == len(tris)
+    assert np.unique(colors[:, 0]).size > 1, "Color boundaries lost in preview"
+    assert np.mean(colors[:, 0]) > 40
