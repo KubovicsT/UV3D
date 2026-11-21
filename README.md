@@ -1,6 +1,6 @@
 # UV3D
 
-**Prototype v0.3 — offline experimental UV slicing. No printhead, motor, UV lamp, or printer control is implemented.**
+**Prototype v0.4 — offline experimental UV slicing. No printhead, motor, UV lamp, or printer control is implemented.**
 
 UV3D targets the Gongzheng H6090EI (three Epson i3200 heads, CMYK/white/varnish), with FlexiPRINT MiniTX GongZheng Edition and Gongzheng PrintExp. It is independent of both vendor applications.
 
@@ -11,9 +11,12 @@ UV3D targets the Gongzheng H6090EI (three Epson i3200 heads, CMYK/white/varnish)
 - Interactive orbitable **3D build viewport**: left-drag orbit, right/middle-drag pan, wheel zoom, Reset view.
 - **Set model height in millimeters**: the mesh is scaled uniformly in X/Y/Z and the exact same transformed geometry is used for both preview and exported slices.
 - Slicer-style **vertical layer slider**, synchronized numeric layer selector, translucent full-model silhouette, visible solid portion below the slice and amber highlighted cross-section **before export**.
+- **Supp-style view controls and appearance:** right-drag orbit, middle-drag pan, wheel zoom, Z-up camera with no roll, isometric/top/front/right/fit presets, charcoal-gray background, build grid and XYZ axis markers. Left click is reserved for future selection and transform tools.
 - **Windows 3D viewport: full original mesh resolution.** The OpenGL 3.3 viewer uploads the original mesh triangles and uses the graphics card for orbit, pan, zoom and live layer clipping, with **no simplification**. Slice boundaries are calculated off the main thread.
 - Headless test machines and unsupported display environments retain the lower-detail software renderer as a fallback. GPU viewer requires functioning OpenGL 3.3 drivers and enough available graphics memory; Windows graphics driver support must be verified on the actual machine.
 - Exported slices always use the complete original mesh geometry, regardless of viewer.
+- **Crash-resistant layer generation:** masks are generated in a **separate Python process**, so a native OpenCV/geometry failure can terminate the worker without closing UV3D. The main window shows progress, a Cancel button and an error dialog with a log path. Every job gets a diagnostic log under `workspace/logs`; incomplete output remains separated under `workspace/jobs`.
+- **Compatibility slicing:** optional checkbox switches to the older, slower PIL/GEOS workflow if a particular model fails in the accelerated worker.
 - **Faster layer generation:** Z-range face filtering, loop stitching, OpenCV filling/PNG encoding, and reuse of unchanged/blank layer masks. Still produces same-size white, varnish and approximate colored boundary PNGs for every layer, plus a JSON job manifest.
 - Support hollow regions, warn about open geometry and reject oversized jobs.
 - Preview exported 2D masks by channel, inspect layers inside the 3D view and simulate job progress with **no printer commands**.
@@ -83,6 +86,16 @@ The production app doesn't rely on system Python. MIT licensed: see LICENSE.
 ## Diagnosing slow imports
 
 Open a model, then check the import messages in the slicer log. It records **geometry load seconds** and **preview preparation seconds** separately so you can see which stage needs additional optimization. Large files may still take time to read or upload to GPU memory, but the import worker keeps most of the processing off the UI thread. Only one import/export task runs at a time; the program intentionally prevents shutdown while the worker is active.
+
+## Layer-generator crashes and logs
+
+For any mask-generation failure, UV3D remains open and displays a dialog instead of closing silently. The log path appears in the dialog and left-hand activity log, normally:
+
+    X:\UV3D\workspace\logs\<model>_<timestamp>.log
+
+The file records the job, processing mode and most recent completed layer, plus Python tracebacks or a fatal-error thread dump when available. A native Windows termination or out-of-memory kill may leave only the last successful layer and an exit code; no error-reporting mechanism can guarantee a stack trace for every system crash.
+
+If a particular model fails with accelerated slicing, check **Compatibility slicing**, retry, and share the diagnostic log if the failure persists. Jobs are never sent to printer hardware. The separate worker is intended to isolate slicer faults, not fix every possible source of bad geometry or memory exhaustion.
 
 ## Next milestones
 
