@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (
     QProgressBar, QPushButton, QSlider, QSpinBox, QSplitter, QTabWidget,
     QVBoxLayout, QWidget,
 )
-from .core import MachineProfile, SliceSettings, load_mesh, prepare_mesh, slice_model
+from .core import MachineProfile, SliceSettings, load_mesh
+from .gui_slicer import SlicerController
 from .viewport import ModelViewport as SoftwareModelViewport, build_preview_geometry
 
 # Interactive Windows sessions render the ORIGINAL mesh on the GPU.
@@ -32,24 +33,6 @@ else:
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE = ROOT / "workspace"
-
-
-class SliceWorker(QObject):
-    progress = Signal(int, int)
-    finished = Signal(str)
-    error = Signal(str)
-
-    def __init__(self, src: Path, dst: Path, settings: SliceSettings):
-        super().__init__()
-        self.src, self.dst, self.settings = src, dst, settings
-
-    def run(self):
-        try:
-            result = slice_model(self.src, self.dst, self.settings,
-                                 lambda current, total: self.progress.emit(current, total))
-            self.finished.emit(str(result))
-        except Exception as exc:
-            self.error.emit(f"{type(exc).__name__}: {exc}")
 
 
 class ImportWorker(QObject):
@@ -97,6 +80,12 @@ class MainWindow(QMainWindow):
         self.job_data: dict | None = None
         self.worker_thread = None
         self.worker = None
+        self.slicer = SlicerController(ROOT, self)
+        self.slicer.running_changed.connect(self.on_slicer_running_changed)
+        self.slicer.progress.connect(self.on_slicer_progress)
+        self.slicer.stage.connect(self.on_slicer_stage)
+        self.slicer.succeeded.connect(self.export_finished)
+        self.slicer.failed.connect(self.on_slicer_failed)
         self.import_thread = None
         self.import_worker = None
         self.source_preview = None
@@ -187,6 +176,10 @@ class MainWindow(QMainWindow):
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.start_export)
         controls.addWidget(self.export_button)
+        self.cancel_export_button = QPushButton('Cancel layer generation')
+        self.cancel_export_button.setEnabled(False)
+        self.cancel_export_button.clicked.connect(self.cancel_export)
+        controls.addWidget(self.cancel_export_button)
         self.progress = QProgressBar()
         controls.addWidget(self.progress)
         self.output_label = QLabel("No job exported")
@@ -337,7 +330,7 @@ class MainWindow(QMainWindow):
 
     def load_model_file(self, filename: str | Path):
         """Start an asynchronous import; returns immediately, keeping UI usable."""
-        if self.worker_thread is not None or self.import_thread is not None:
+        if self.slicer.running or self.import_thread is not None:
             QMessageBox.warning(self, "Busy", "Finish the current export/import before opening another model.")
             return
         self.open_button.setEnabled(False)
@@ -398,7 +391,7 @@ class MainWindow(QMainWindow):
         self.import_thread = None
         self.import_worker = None
         self.open_button.setEnabled(True)
-        self.export_button.setEnabled(self.mesh_path is not None and self.worker_thread is None)
+        self.export_button.setEnabled(self.mesh_path is not None and not self.slicer.running)
 
     def on_height_changed(self, *_, reset_camera=False, reset_layer=False):
         if self.source_mesh is None:
@@ -485,7 +478,7 @@ class MainWindow(QMainWindow):
         self.sim_detail.setText("Previous job invalidated by model/settings change.")
 
     def start_export(self):
-        if not self.mesh_path or self.worker_thread is not None:
+        if not self.mesh_path or self.slicer.running or self.import_thread is not None:
             return
         settings = SliceSettings(
             layer_mm=self.layer.value(), target_height_mm=self.model_height.value(),
@@ -493,37 +486,42 @@ class MainWindow(QMainWindow):
             body_material=self.body.currentText(),
             placement_x_mm=self.x_pos.value(), placement_y_mm=self.y_pos.value()
         )
-        job_name = self.mesh_path.stem[:50] + "_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        out = WORKSPACE / "jobs" / job_name
-        self.export_button.setEnabled(False)
-        for control in (self.model_height, self.layer, self.dpi, self.shell, self.body,
-                        self.x_pos, self.y_pos):
-            control.setEnabled(False)
+        self.progress.setRange(0, 100)
         self.progress.setValue(0)
-        self.log.appendPlainText(f"Generating scaled offline export: {out}")
-        thread = QThread(self)
-        worker = SliceWorker(self.mesh_path, out, settings)
-        self.worker = worker
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.progress.connect(lambda current, total: self.progress.setValue(round(100 * current / total)))
-        worker.finished.connect(self.export_finished)
-        worker.error.connect(self.export_failed)
-        worker.finished.connect(thread.quit)
-        worker.error.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self.thread_finished)
-        self.worker_thread = thread
-        thread.start()
+        self.slicer.start(self.mesh_path, settings)
 
-    def thread_finished(self):
-        self.worker_thread = None
-        self.worker = None
-        for control in (self.model_height, self.layer, self.dpi, self.shell, self.body,
-                        self.x_pos, self.y_pos):
-            control.setEnabled(self.mesh_path is not None)
-        self.export_button.setEnabled(self.mesh_path is not None)
+    def on_slicer_running_changed(self, running):
+        self.export_button.setEnabled(not running and self.mesh_path is not None)
+        self.cancel_export_button.setEnabled(running)
+        self.open_button.setEnabled(not running and self.import_thread is None)
+        for control in (self.model_height, self.layer, self.dpi, self.shell,
+                        self.body, self.x_pos, self.y_pos):
+            control.setEnabled(not running and self.mesh_path is not None)
+
+    def on_slicer_progress(self, current, total, seconds):
+        total = max(1, total)
+        self.progress.setValue(round(100 * current / total))
+        self.statusBar().showMessage(
+            f'Generating layer {current:,}/{total:,} ({seconds:.1f}s)')
+
+    def on_slicer_stage(self, stage):
+        self.log.appendPlainText(stage)
+        self.statusBar().showMessage(stage)
+
+    def on_slicer_failed(self, problem, log_path):
+        self.progress.setValue(0)
+        self.log.appendPlainText(f'Layer generation failed: {problem}')
+        self.log.appendPlainText(f'Diagnostic log: {log_path}')
+        self.statusBar().showMessage('Layer generation failed; see diagnostic log')
+        QMessageBox.warning(self, 'UV3D layer generation failed',
+                            f'{problem}\n\nCrash report: {log_path}\n'
+                            'The app remains open. Incomplete output is retained.')
+
+    def cancel_export(self):
+        if self.slicer.running and QMessageBox.question(
+            self, 'Cancel layer generation',
+            'Stop the worker? Incomplete layers will be preserved for diagnosis.') == QMessageBox.Yes:
+            self.slicer.cancel()
 
     def export_finished(self, job_path: str):
         self.job_path = Path(job_path)
@@ -572,7 +570,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Import in progress", "Wait for the import to finish before closing UV3D.")
             event.ignore()
             return
-        if self.worker_thread is not None and self.worker_thread.isRunning():
+        if self.slicer.running or (self.worker_thread is not None and self.worker_thread.isRunning()):
             QMessageBox.warning(self, "Export in progress", "Finish exporting layers before closing UV3D.")
             event.ignore()
             return
@@ -583,7 +581,7 @@ class MainWindow(QMainWindow):
         if not script.is_file() or sys.platform != "win32":
             QMessageBox.warning(self, "Update unavailable", "Windows updater script not found.")
             return
-        if self.worker_thread is not None or self.import_thread is not None:
+        if self.slicer.running or self.import_thread is not None:
             QMessageBox.warning(self, "Busy", "Finish model import/export before updating.")
             return
         if QMessageBox.question(self, "Update from main",
