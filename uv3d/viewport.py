@@ -185,7 +185,12 @@ class ModelViewport(QWidget):
         self.update()
 
     def set_slice_mode(self, active: bool) -> None:
-        self.slice_mode = bool(active)
+        active = bool(active)
+        if self.slice_mode == active:
+            return
+        self.slice_mode = active
+        self._cap_revision += 1
+        self._cap_polys = []
         if self.slice_mode:
             self._cap_timer.start()
         else:
@@ -197,9 +202,13 @@ class ModelViewport(QWidget):
             self.slice_z = 0
             return
         height = float(self.mesh.extents[2])
-        self.slice_z = float(np.clip(z_mm, 0.0, height))
+        new_z = float(np.clip(z_mm, 0.0, height))
+        if abs(new_z - self.slice_z) < 1e-9:
+            return
+        self.slice_z = new_z
+        self._cap_revision += 1
+        self._cap_polys = []
         if self.slice_mode:
-            self._cap_polys = []
             self._cap_timer.start()
         self.update()
 
