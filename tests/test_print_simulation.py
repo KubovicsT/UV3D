@@ -178,3 +178,66 @@ def test_simulation_widget_timeline_controls_without_gpu(tmp_path):
     ui.step_layer(-1)
     assert ui.plan.get_frame(ui.elapsed/ui.plan.total_seconds).layer_index==2
     ui.close()
+
+
+
+def test_timeline_drag_coalesces_frames_and_does_not_start_png_workers(tmp_path):
+    """A large rapid seek must NOT spawn a thread or open a PNG per layer."""
+    from types import SimpleNamespace
+
+    app = QApplication.instance() or QApplication([])
+    job, _ = make_job(tmp_path / "job", layers=200)
+    ui = SimulationWidget(tmp_path, gpu_enabled=False)
+    ui.load_job(job)
+
+    class FakeViewport:
+        def __init__(self):
+            self.original_mesh = object()
+            self.frames = []
+        def set_frame(self, frame):
+            self.frames.append(frame)
+        def set_layer_bitmaps(self, *args):
+            pass
+
+    fake = FakeViewport()
+    ui.viewport = fake
+    ui._scene_ready = True
+    ui.timeline.setSliderDown(True)
+    for i in range(1001):
+        ui.timeline.setValue((i * 9831) % 100_001)
+    assert ui._texture_thread is None
+    assert not ui._texture_delay.isActive()
+    assert ui._wanted_texture_layer == -1
+    assert len(fake.frames) <= 1, "Redrawing for every slider pixel is unsafe"
+    # When the slider is released the preview layer may be requested once.
+    ui.timeline.setValue(47_000)
+    ui.timeline.setSliderDown(False)
+    assert ui._wanted_texture_layer == ui.plan.get_frame(.47).layer_index
+    assert ui._texture_delay.isActive()
+    assert ui._texture_thread is None
+    ui._texture_delay.stop()
+    ui.close()
+
+
+def test_simulation_opengl_error_is_caught_at_qt_paint_boundary():
+    """Even a PyOpenGL exception must not escape into native Qt painting."""
+    from uv3d.simulation_viewport import SimulationViewport
+
+    app = QApplication.instance() or QApplication([])
+    viewport = SimulationViewport()
+    details = []
+    viewport.opengl_failed.connect(details.append)
+    calls = []
+
+    def throw():
+        calls.append(1)
+        raise RuntimeError("injected GL_INVALID_OPERATION")
+
+    viewport._paint_simulation_frame = throw
+    viewport.paintGL()  # must not raise or terminate the interpreter
+    viewport.paintGL()  # disabled viewport must not retry the same failure
+    assert len(calls) == 1
+    assert len(details) == 1
+    assert "GL_INVALID_OPERATION" in details[0]
+    assert not viewport._gpu_ready
+    viewport.close()
