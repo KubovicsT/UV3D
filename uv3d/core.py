@@ -59,13 +59,26 @@ def load_mesh(filename: str | Path) -> tuple[trimesh.Trimesh, list[str]]:
     if path.suffix.lower() not in (".stl", ".obj", ".glb", ".gltf", ".3mf", ".ply"):
         raise ValueError("Supported formats: STL, OBJ, GLB, GLTF, 3MF, PLY")
     scene = trimesh.load_scene(str(path))
-    meshes = [m for m in scene.dump() if isinstance(m, trimesh.Trimesh) and len(m.faces)]
-    if not meshes:
-        raise ValueError("File contains no printable triangle meshes.")
-    has_texture = any(getattr(m.visual, "kind", "") == "texture" for m in meshes)
-    # Avoid rebuilding/copying the entire vertex+face array when the file has
-    # just one mesh (the common case for STL and many OBJ/PLY files).
-    mesh = meshes[0] if len(meshes) == 1 else trimesh.util.concatenate(meshes)
+    # scene.dump() deep-copies visual arrays and can invoke optional SciPy
+    # conversion even for an untransformed single mesh. Avoid that overhead.
+    nodes = list(scene.graph.nodes_geometry)
+    if len(nodes) == 1:
+        transform, key = scene.graph.get(nodes[0])
+        original = scene.geometry[key]
+        if isinstance(original, trimesh.Trimesh) and len(original.faces):
+            if np.allclose(transform, np.eye(4)):
+                mesh = original
+            else:
+                mesh = original.copy()
+                mesh.apply_transform(transform)
+        else:
+            raise ValueError("File contains no printable triangle meshes.")
+    else:
+        meshes = [m for m in scene.dump() if isinstance(m, trimesh.Trimesh) and len(m.faces)]
+        if not meshes:
+            raise ValueError("File contains no printable triangle meshes.")
+        mesh = trimesh.util.concatenate(meshes)
+    has_texture = getattr(mesh.visual, "kind", "") == "texture"
     if not np.isfinite(mesh.vertices).all():
         raise ValueError("Model contains non-finite coordinates.")
     warnings = []
@@ -105,6 +118,10 @@ def _face_colors(mesh: trimesh.Trimesh) -> np.ndarray:
     try:
         if getattr(vis, "kind", None) == "texture":
             vis = vis.to_color()
+        if getattr(vis, "kind", None) == "vertex":
+            vertex = np.asarray(vis.vertex_colors, dtype=np.uint8)
+            if len(vertex) == len(mesh.vertices):
+                return np.rint(vertex[mesh.faces, :3].mean(axis=1)).astype(np.uint8)
         rgb = np.asarray(vis.face_colors, dtype=np.uint8)
         if rgb.shape[0] == len(mesh.faces) and rgb.shape[1] >= 3:
             return rgb[:, :3]
