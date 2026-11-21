@@ -68,6 +68,8 @@ def test_gui_height_and_slider_before_export(tmp_path):
     gui.load_model_file(src)
     process_until(app, lambda: gui.import_thread is None and gui.source_mesh is not None)
     assert gui.viewport.mesh is not None
+    assert gui.progress.value() == 0, "Mask progress must not show completed after import"
+    assert gui.job_data is None
     assert gui.slice_slider.isEnabled()
     gui.model_height.setValue(4)
     np.testing.assert_allclose(gui.preview_mesh.extents, [10, 8, 4])
