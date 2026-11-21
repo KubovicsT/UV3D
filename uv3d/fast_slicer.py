@@ -20,6 +20,7 @@ from .core import (
     _face_colors, _polygons_from_segments,
 )
 from .job_storage import calculate_job_plan, ensure_disk_space
+from .support import effective_raster_margin, generate_support_masks
 
 
 def _contours_from_segments(segments: np.ndarray, tolerance: float = 1e-5):
@@ -96,7 +97,7 @@ def _contour_pixels(segments, minimum, maximum, pixels_per_mm, margin_mm):
 
 
 def slice_fast(filename, output_dir, settings: SliceSettings,
-               on_progress=None, profile=None, on_plan=None):
+               on_progress=None, profile=None, on_plan=None, on_stage=None):
     """Generate the same offline masks and manifest as the legacy slicer."""
     settings.validate()
     machine = profile or MachineProfile()
@@ -108,8 +109,9 @@ def slice_fast(filename, output_dir, settings: SliceSettings,
     if height_mm > 180:
         raise ValueError("Model exceeds 180 mm nominal media clearance; no verified 3D build envelope exists.")
     ppm = settings.dpi / 25.4
-    w = math.ceil((width_mm + 2 * settings.margin_mm) * ppm)
-    h = math.ceil((depth_mm + 2 * settings.margin_mm) * ppm)
+    raster_margin = effective_raster_margin(settings)
+    w = math.ceil((width_mm + 2 * raster_margin) * ppm)
+    h = math.ceil((depth_mm + 2 * raster_margin) * ppm)
     if w <= 0 or h <= 0 or w * h > 16_000_000:
         raise ValueError("Raster exceeds 16 million pixels. Reduce model size or DPI.")
     if (settings.placement_x_mm + w / ppm > machine.bed_x_mm
@@ -118,7 +120,7 @@ def slice_fast(filename, output_dir, settings: SliceSettings,
     n = math.ceil(height_mm / settings.layer_mm)
     # Total pixel count affects runtime and disk use, not peak raster RAM:
     # only the active layer is rendered, encoded, then written to disk.
-    plan = calculate_job_plan(w, h, n)
+    plan = calculate_job_plan(w, h, n, support_enabled=settings.support_enabled)
     out = Path(output_dir)
     if out.exists() and any(out.iterdir()):
         raise ValueError("Export folder must be empty, to avoid mixing jobs.")
@@ -139,10 +141,16 @@ def slice_fast(filename, output_dir, settings: SliceSettings,
         "model_bounds_mm": [minimum.tolist(), maximum.tolist()],
         "raster_size_px": [w, h],
         "raster_footprint_mm": [w / ppm, h / ppm],
+        "effective_raster_margin_mm": raster_margin,
+        "solid_volume": True,
+        "support": {"enabled": settings.support_enabled, "casing_mm": settings.support_casing_mm,
+                    "material": "UNASSIGNED - requires separately validated removable support ink"},
         "storage_plan": plan.as_dict(),
         "warnings": warnings + [
             "PrintExp .prt generation and printer API are NOT integrated.",
-            "Supports, overhang analysis, true texture mapping and color management are NOT implemented.",
+            "Experimental conformal support geometry is not validated for real material deposition or dissolving.",
+            "Support trapped in sealed cavities may not be removable.",
+            "Overhang stability, curing and color management are NOT verified.",
             "White and varnish are grayscale mask proposals; correct RIP spot channels must be validated.",
             "Layer thickness is a target, not validated cured material thickness."
         ],
@@ -175,6 +183,9 @@ def slice_fast(filename, output_dir, settings: SliceSettings,
     prev_mask = None
     prev_encoded = None
 
+    progress_total = n * (2 if settings.support_enabled else 1)
+    if on_stage:
+        on_stage("Generating solid model volume masks and exterior color boundaries")
     for idx in range(n):
         ensure_disk_space(out, plan.pixels_per_layer)
         z = min(minimum[2] + (idx + .5) * settings.layer_mm, maximum[2] - 1e-6)
@@ -199,7 +210,7 @@ def slice_fast(filename, output_dir, settings: SliceSettings,
         mask = np.zeros((h, w), dtype=np.uint8)
         if len(segments):
             contours = _contour_pixels(
-                segments, minimum, maximum, ppm, settings.margin_mm)
+                segments, minimum, maximum, ppm, raster_margin)
             if contours:
                 # One call uses even/odd filling; inner loops remain hollow.
                 cv2.fillPoly(mask, contours, 255, lineType=cv2.LINE_8)
@@ -216,8 +227,8 @@ def slice_fast(filename, output_dir, settings: SliceSettings,
         if filled:
             rgba = np.zeros((h, w, 4), dtype=np.uint8)
             xy = np.rint(np.stack((
-                (segments[:, :, 0] - minimum[0] + settings.margin_mm) * ppm,
-                (maximum[1] - segments[:, :, 1] + settings.margin_mm) * ppm,
+                (segments[:, :, 0] - minimum[0] + raster_margin) * ppm,
+                (maximum[1] - segments[:, :, 1] + raster_margin) * ppm,
             ), axis=-1)).astype(np.int32)
             for segment, face_id in zip(xy, hit_faces):
                 r, g, b = (int(value) for value in colors[face_id])
@@ -247,7 +258,17 @@ def slice_fast(filename, output_dir, settings: SliceSettings,
             "contains_geometry": filled,
         })
         if on_progress:
-            on_progress(idx + 1, n)
+            on_progress(idx + 1, progress_total)
+    if settings.support_enabled:
+        if on_stage:
+            on_stage("Generating conformal support masks from top down to build plate")
+        def support_progress(completed, _total):
+            if on_progress:
+                on_progress(n + completed, progress_total)
+        manifest["support"]["statistics"] = generate_support_masks(
+            out, manifest["layers"], settings.body_material,
+            settings.support_casing_mm, settings.dpi, settings.layer_mm,
+            on_progress=support_progress)
     job = out / "job.json"
     job.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return job
