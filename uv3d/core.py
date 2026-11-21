@@ -14,6 +14,7 @@ from PIL import Image, ImageDraw, ImageChops
 import trimesh
 from shapely.geometry import LineString
 from shapely.ops import polygonize, unary_union
+from .job_storage import calculate_job_plan, ensure_disk_space
 
 
 @dataclass
@@ -179,7 +180,8 @@ def _paint_polygon_mask(polys, size: tuple[int, int], pxy) -> Image.Image:
 
 
 def _slice_model_legacy(filename: str | Path, output_dir: str | Path, settings: SliceSettings,
-                on_progress=None, profile: MachineProfile | None = None) -> Path:
+                on_progress=None, profile: MachineProfile | None = None,
+                on_plan=None) -> Path:
     """Generate numbered PNG masks and manifest; all operations are offline.
 
     Images share size/origin. Outputs are NOT directly printer-ready: RIP white and
@@ -202,10 +204,7 @@ def _slice_model_legacy(filename: str | Path, output_dir: str | Path, settings: 
     if settings.placement_x_mm + (w / pixel_per_mm) > machine.bed_x_mm or settings.placement_y_mm + (h / pixel_per_mm) > machine.bed_y_mm:
         raise ValueError("Raster placement exceeds the configured 600×900 mm bed.")
     n = math.ceil(model_height / settings.layer_mm)
-    if n > 2000:
-        raise ValueError("More than 2000 layers; increase layer thickness for this prototype.")
-    if n * w * h > 350_000_000:
-        raise ValueError("Job too large for this prototype (over 350M layer-pixels).")
+    plan = calculate_job_plan(w, h, n)
 
     def pxy(x: float, y: float) -> tuple[int, int]:
         return (round((x - minimum[0] + settings.margin_mm) * pixel_per_mm),
@@ -214,6 +213,9 @@ def _slice_model_legacy(filename: str | Path, output_dir: str | Path, settings: 
     out = Path(output_dir)
     if out.exists() and any(out.iterdir()):
         raise ValueError("Export folder must be empty, to avoid mixing jobs.")
+    ensure_disk_space(out, plan.pixels_per_layer)
+    if on_plan:
+        on_plan(plan)
     out.mkdir(parents=True, exist_ok=True)
     colors = _face_colors(mesh)
     manifest = {
@@ -228,6 +230,7 @@ def _slice_model_legacy(filename: str | Path, output_dir: str | Path, settings: 
         "model_bounds_mm": [minimum.tolist(), maximum.tolist()],
         "raster_size_px": [w, h],
         "raster_footprint_mm": [w / pixel_per_mm, h / pixel_per_mm],
+        "storage_plan": plan.as_dict(),
         "warnings": warnings + [
             "PrintExp .prt generation and printer API are NOT integrated.",
             "Supports, overhang analysis, true texture mapping and color management are NOT implemented.",
@@ -238,6 +241,7 @@ def _slice_model_legacy(filename: str | Path, output_dir: str | Path, settings: 
     }
     stroke_width = max(1, round(settings.shell_mm * pixel_per_mm))
     for index in range(n):
+        ensure_disk_space(out, plan.pixels_per_layer)
         z = min(minimum[2] + (index + 0.5) * settings.layer_mm, maximum[2] - 1e-6)
         segs, faces = trimesh.intersections.mesh_plane(mesh, [0, 0, 1], [0, 0, z], return_faces=True)
         polys = _polygons_from_segments(segs)
@@ -275,7 +279,8 @@ def _slice_model_legacy(filename: str | Path, output_dir: str | Path, settings: 
 
 
 def slice_model(filename: str | Path, output_dir: str | Path, settings: SliceSettings,
-                on_progress=None, profile: MachineProfile | None = None) -> Path:
+                on_progress=None, profile: MachineProfile | None = None,
+                on_plan=None) -> Path:
     """Default fast offline slicer; API and manifest kept compatible."""
     from .fast_slicer import slice_fast
-    return slice_fast(filename, output_dir, settings, on_progress, profile)
+    return slice_fast(filename, output_dir, settings, on_progress, profile, on_plan=on_plan)
