@@ -33,30 +33,51 @@ uniform sampler2D uBody;
 uniform sampler2D uColor;
 uniform sampler2D uSupport;
 uniform vec4 uSupportTint;
-uniform vec3 uModelTint;
+uniform vec3 uCurrentModelTint;
+uniform vec3 uCurrentSupportTint;
 uniform int uRows;
 uniform int uRowIndex;
+uniform int uPasses;
+uniform int uPassesCompleted;
+uniform int uScanDirection;
+uniform bool uPrinting;
 uniform float uRowProgress;
 uniform bool uFullLayer;
+
 void main() {
-    // Conceptual scan coverage: rows progress from top Y to bottom Y.
-    int row = min(uRows-1, int(floor(clamp(vUV.y, 0.0, 0.9999999) * float(uRows))));
-    if (!uFullLayer) {
-        if (row > uRowIndex) discard;
-        if (row == uRowIndex) {
+    // All raster rows follow the actual head's Y swath bands. Previous
+    // bands are complete; future bands have not been printed yet.
+    int row = min(uRows - 1,
+                  int(floor(clamp(vUV.y, 0.0, 0.9999999) * float(uRows))));
+    float coverage = 0.0;
+    if (uFullLayer || row < uRowIndex) {
+        coverage = 1.0;
+    } else if (row == uRowIndex) {
+        // The nozzle traverses the image coordinate matching the physical
+        // printhead. A reverse pass MUST paint right-to-left (not based on
+        // row parity). Non-printing return moves deposit nothing.
+        float already = float(uPassesCompleted);
+        float current = 0.0;
+        if (uPrinting) {
             float p = clamp(uRowProgress, 0.0, 1.0);
-            if ((row % 2 == 0 && vUV.x > p)
-                || (row % 2 != 0 && vUV.x < 1.0-p)) discard;
+            bool reached = (uScanDirection > 0) ? (vUV.x <= p)
+                                                   : (vUV.x >= 1.0 - p);
+            current = reached ? 1.0 : 0.0;
         }
+        coverage = clamp((already + current) / float(max(1,uPasses)), 0.0, 1.0);
     }
+    if (coverage <= 0.0001) discard;
     float body = texture(uBody, vUV).r;
     float support = texture(uSupport, vUV).r;
-    vec4 color = texture(uColor, vUV);
     if (body > 0.03) {
-        vec3 base = mix(uModelTint, color.rgb, color.a);
-        outColor = vec4(base, 1.0);
+        // Highlight only the ACTIVE printing layer, not the finished model.
+        // Retain a small amount of source color for detail recognition.
+        vec4 source = texture(uColor, vUV);
+        vec3 tint = mix(uCurrentModelTint, source.rgb, 0.12 * source.a);
+        outColor = vec4(tint, coverage * body);
     } else if (support > 0.03) {
-        outColor = vec4(uSupportTint.rgb, uSupportTint.a * support);
+        // Different color from the current model and finished support shell.
+        outColor = vec4(uCurrentSupportTint, coverage * support * uSupportTint.a);
     } else {
         discard;
     }
@@ -109,6 +130,9 @@ class SimulationViewport(GpuModelViewport):
         self._support_faces = 0
         self._support_rgb = (0.65, 0.42, 0.88)
         self._support_alpha = .32
+        self._head_alpha = .65
+        self._current_model_rgb = (1.0, 0.66, 0.18)
+        self._current_support_rgb = (0.12, 0.95, 0.83)
         self._model_tint = (0.81, 0.82, 0.85)
         self._fallback_model_tint = False
         self._show_future = False
@@ -159,6 +183,7 @@ class SimulationViewport(GpuModelViewport):
             float(dims[2]) + spec.body_z_mm)
         self.zoom = min(1.0, magnitude / max(magnitude, span_with_head) * 0.92)
         self._raster = manifest
+        self._sim_passes = 6
         self.slice_mode = True  # Important: do NOT trigger expensive CPU plane intersections.
         self._cap_timer.stop()
         self._line_data = None
@@ -167,6 +192,10 @@ class SimulationViewport(GpuModelViewport):
         self._bitmaps = None
         self._bitmap_layer = -1
         self.frame = None
+        self.update()
+
+    def set_simulation_passes(self, passes: int):
+        self._sim_passes = max(1, int(passes))
         self.update()
 
     def set_frame(self, frame: SimulationFrame):
@@ -182,6 +211,19 @@ class SimulationViewport(GpuModelViewport):
     def set_support_tint(self, rgb: tuple[int,int,int], opacity: float):
         self._support_rgb = tuple(float(np.clip(x, 0, 255)) / 255 for x in rgb)
         self._support_alpha = float(np.clip(opacity, 0.0, 1.0))
+        self.update()
+
+    def set_head_opacity(self, opacity: float):
+        self._head_alpha = float(np.clip(opacity, 0.0, 1.0))
+        self.update()
+
+    def set_current_layer_colors(self, model_rgb: tuple[int, int, int],
+                                 support_rgb: tuple[int, int, int]):
+        """Set independent highlight colors for actively deposited materials."""
+        self._current_model_rgb = tuple(float(np.clip(c, 0, 255)) / 255
+                                        for c in model_rgb)
+        self._current_support_rgb = tuple(float(np.clip(c, 0, 255)) / 255
+                                          for c in support_rgb)
         self.update()
 
     def set_model_tint(self, rgb: tuple[int,int,int], fallback_only: bool = True):
@@ -307,10 +349,20 @@ class SimulationViewport(GpuModelViewport):
                 GL.glUniform1i(GL.glGetUniformLocation(self._program, name), channel)
             GL.glUniform4f(GL.glGetUniformLocation(self._program, "uSupportTint"),
                            *self._support_rgb, self._support_alpha)
-            GL.glUniform3f(GL.glGetUniformLocation(self._program, "uModelTint"),
-                           *self._model_tint)
+            GL.glUniform3f(GL.glGetUniformLocation(self._program, "uCurrentModelTint"),
+                           *self._current_model_rgb)
+            GL.glUniform3f(GL.glGetUniformLocation(self._program, "uCurrentSupportTint"),
+                           *self._current_support_rgb)
             GL.glUniform1i(GL.glGetUniformLocation(self._program, "uRows"), frame.rows_per_layer)
             GL.glUniform1i(GL.glGetUniformLocation(self._program, "uRowIndex"), frame.row_index)
+            GL.glUniform1i(GL.glGetUniformLocation(self._program, "uPasses"),
+                           self._sim_passes)
+            GL.glUniform1i(GL.glGetUniformLocation(self._program, "uPassesCompleted"),
+                           frame.passes_completed)
+            GL.glUniform1i(GL.glGetUniformLocation(self._program, "uScanDirection"),
+                           frame.scan_direction)
+            GL.glUniform1i(GL.glGetUniformLocation(self._program, "uPrinting"),
+                           int(frame.printing))
             self._set1f("uRowProgress", frame.row_fraction)
             GL.glUniform1i(GL.glGetUniformLocation(self._program, "uFullLayer"),
                            int(frame.completed))
@@ -327,20 +379,31 @@ class SimulationViewport(GpuModelViewport):
             self._set_uniforms(w,h)
 
     def _draw_head(self):
-        if self.frame is None or self.mesh is None:
+        if self.frame is None or self.mesh is None or self._head_alpha <= .001:
             return
         x, y, z = self.frame.head_position_mm
         head = make_head_cuboid(x,y,z)
         self._setup_simple_vao(self._head_vao, self._head_vbo)
         GL.glBufferData(GL.GL_ARRAY_BUFFER, head.nbytes,
                         head.tobytes(), GL.GL_STREAM_DRAW)
-        GL.glUniform1i(GL.glGetUniformLocation(self._program, "uMode"), 4)
+        # Separate shader mode uses per-face gray shading with adjustable
+        # alpha, without changing other model/support drawing modes.
+        GL.glUniform1i(GL.glGetUniformLocation(self._program, "uMode"), 6)
+        GL.glUniform4f(GL.glGetUniformLocation(self._program, "uSupportTint"),
+                       1.0, 1.0, 1.0, self._head_alpha)
         self._set1f("uScale", 1)
         self._set1f("uBaseZ", 0)
         GL.glEnable(GL.GL_DEPTH_TEST)
-        GL.glDrawArrays(GL.GL_TRIANGLES, 0, len(head))
-        self._set1f("uScale", self._scale)
-        self._set1f("uBaseZ", self._base_min_z)
+        GL.glEnable(GL.GL_BLEND)
+        GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
+        GL.glDepthMask(GL.GL_FALSE)
+        try:
+            GL.glDrawArrays(GL.GL_TRIANGLES, 0, len(head))
+        finally:
+            GL.glDepthMask(GL.GL_TRUE)
+            GL.glDisable(GL.GL_BLEND)
+            self._set1f("uScale", self._scale)
+            self._set1f("uBaseZ", self._base_min_z)
 
     def _paint_simulation_frame(self):
         ratio = self.devicePixelRatioF()
