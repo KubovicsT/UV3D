@@ -34,7 +34,7 @@ class PrintHeadSpec:
 
 @dataclass(frozen=True)
 class MotionSegment:
-    kind: str                     # print, travel, stepover, return, z_move
+    kind: str                     # print, travel, uv_followthrough, cure, return, z_move
     layer_index: int
     start_xyz: tuple[float, float, float]
     end_xyz: tuple[float, float, float]
@@ -81,10 +81,13 @@ class SimulationFrame:
 
 
 class PrintSimulation:
-    """Print each pass, immediately cure its swath, then print the next pass.
+    """Model a shared gantry whose *trailing* UV lamp cures during printing.
 
-    All segments are continuous in XYZ; movement speed applies to UV travel,
-    cure sweeps and returns. Seek uses a binary search even for large jobs.
+    Forward scans use the lamp to the left of the printheads and reverse
+    scans the lamp to their right. If the lamp covers the active swath, UV
+    runs during deposition, with only a short follow-through if its
+    footprint has not yet reached the raster's far edge. Otherwise one
+    post-print cure sweep is scheduled. Every segment is continuous in XYZ.
     """
 
     def __init__(
@@ -266,7 +269,7 @@ class PrintSimulation:
                     float(self.layers[0]["target_stack_height_mm"]) + self.head_clearance_mm)
 
         def add(kind, layer, dest, band, pidx, lamp_index=-1,
-                stationary_hold_s=0.0):
+                stationary_hold_s=0.0, lamp_on=False):
             nonlocal elapsed, elapsed_print, last_xyz
             dist = math.dist(last_xyz, dest)
             speed = self.print_speed_mm_s if kind == "print" else self.move_speed_mm_s
@@ -280,7 +283,7 @@ class PrintSimulation:
                 seg = MotionSegment(
                     kind, layer, last_xyz, dest, speed, duration,
                     band, pidx, kind == "print", lamp_index,
-                    kind == "cure")
+                    kind in ("cure", "uv_followthrough") or lamp_on)
                 self.segments.append(seg)
                 elapsed += duration
                 if kind == "print":
@@ -309,17 +312,11 @@ class PrintSimulation:
                             or abs(last_xyz[1] - y) > 1e-9):
                         add("stepover" if band else "travel", layer,
                             (start_x, y, z), band, pass_index)
-                    before = elapsed
-                    add("print", layer, (target_x, y, z), band, pass_index)
-                    print_seconds += elapsed - before
-
-                    # Print -> UV cure -> print -> UV cure, for EACH pass.
-                    # Curing is restricted to the just-printed Y strip,
-                    # rather than re-illuminating every band after the whole
-                    # layer has already been deposited. Mounted lamps and
-                    # printheads share a physical gantry coordinate system.
-                    # Work out which part of the raster the heads could have
-                    # reached during this printing pass.
+                    # UV lamp selection is based on PHYSICAL relative X
+                    # placement, not on the direction of the current row.
+                    # The lamp behind ALL active heads is the only one lit.
+                    # This prevents the leading lamp curing ink before the
+                    # printheads have deposited it.
                     printed_top = min(
                         self.max_y,
                         max(y + head.offset_y_mm + head.swath_mm * .5
@@ -328,11 +325,92 @@ class PrintSimulation:
                         self.min_y,
                         min(y + head.offset_y_mm - head.swath_mm * .5
                             for head in active_heads))
-                    if printed_top > printed_bottom:
-                        for _ in range(self.gantry_config.cure_passes):
-                            for lamp_index, lamp in enumerate(self.gantry_config.lamps):
-                                if not lamp.enabled:
-                                    continue
+                    candidates = [
+                        (i, lamp)
+                        for i, lamp in enumerate(self.gantry_config.lamps)
+                        if lamp.enabled and (
+                            lamp.offset_x_mm < min(h.offset_x_mm for h in active_heads)
+                            if forward else
+                            lamp.offset_x_mm > max(h.offset_x_mm for h in active_heads))
+                    ]
+                    if not candidates:
+                        # If only a leading/central lamp is installed, do
+                        # not illuminate it during printing. Use ONE lamp
+                        # in a later dedicated curing sweep instead.
+                        candidates = [
+                            (i, lamp) for i, lamp in enumerate(
+                                self.gantry_config.lamps) if lamp.enabled
+                        ]
+
+                    def lamp_rank(candidate):
+                        _, lamp = candidate
+                        covers_y = (
+                            y + lamp.offset_y_mm + lamp.depth_mm*.5 >=
+                                printed_top - 1e-7
+                            and y + lamp.offset_y_mm - lamp.depth_mm*.5 <=
+                                printed_bottom + 1e-7)
+                        if forward:
+                            tail = max(
+                                0.0, self.min_x + self.width -
+                                (target_x + lamp.offset_x_mm + lamp.width_mm*.5))
+                        else:
+                            tail = max(
+                                0.0,
+                                target_x + lamp.offset_x_mm -
+                                lamp.width_mm*.5 - self.min_x)
+                        # Prefer a lamp that fits the swath, and the one
+                        # needing least extra non-print travel.
+                        return (not covers_y, tail, abs(lamp.offset_x_mm))
+
+                    selected = min(candidates, key=lamp_rank) if candidates else None
+                    selected_i = selected[0] if selected else -1
+                    selected_lamp = selected[1] if selected else None
+                    is_trailing = selected_lamp is not None and (
+                        selected_lamp.offset_x_mm <
+                            min(h.offset_x_mm for h in active_heads)
+                        if forward else
+                        selected_lamp.offset_x_mm >
+                            max(h.offset_x_mm for h in active_heads))
+                    fits_y = (
+                        selected_lamp is not None and
+                        y + selected_lamp.offset_y_mm +
+                            selected_lamp.depth_mm*.5 >= printed_top - 1e-7 and
+                        y + selected_lamp.offset_y_mm -
+                            selected_lamp.depth_mm*.5 <= printed_bottom + 1e-7)
+                    inline_uv = (
+                        printed_top > printed_bottom and is_trailing and fits_y)
+                    before = elapsed
+                    add("print", layer, (target_x, y, z), band, pass_index,
+                        selected_i if inline_uv else -1, lamp_on=inline_uv)
+                    print_seconds += elapsed - before
+
+                    if inline_uv:
+                        # The lamp footprint trails the nozzles. Carry the
+                        # head further only if the trailing edge would
+                        # otherwise leave the farthest ink uncured.
+                        if forward:
+                            far_x = max(
+                                last_xyz[0],
+                                self.min_x + self.width -
+                                selected_lamp.offset_x_mm -
+                                selected_lamp.width_mm*.5)
+                        else:
+                            far_x = min(
+                                last_xyz[0],
+                                self.min_x - selected_lamp.offset_x_mm +
+                                selected_lamp.width_mm*.5)
+                        add("uv_followthrough", layer, (far_x, y, z),
+                            band, pass_index, selected_i)
+
+                    # The first UV exposure is already completed DURING
+                    # printing in the inline case. Additional configured
+                    # sweeps remain possible (cure_passes > 1). Otherwise,
+                    # use a separate post-print sweep of ONE selected lamp.
+                    extra_sweeps = (
+                        self.gantry_config.cure_passes - int(inline_uv))
+                    if printed_top > printed_bottom and selected_lamp:
+                        for _ in range(extra_sweeps):
+                            lamp_index, lamp = selected_i, selected_lamp
                                 # A narrow lamp requires more than one
                                 # coverage sweep *of the printed strip*.
                                 # No fictitious whole-layer UV pass is added.
@@ -471,7 +549,7 @@ class PrintSimulation:
             completed_passes = (
                 self.passes if segment.kind in ("return", "z_move")
                 else segment.pass_index + 1 if segment.kind in
-                ("uv_travel", "cure")
+                ("uv_travel", "cure", "uv_followthrough")
                 else segment.pass_index)
             model_fraction = support_fraction = scan_fraction
         return SimulationFrame(
@@ -498,8 +576,8 @@ class PrintSimulation:
             passes_completed=completed_passes,
             model_scan_fraction=model_fraction,
             support_scan_fraction=support_fraction,
-            # UV light starts only when the mounted lamp moves along its
-            # post-pass curing route, not prematurely during ink deposition.
+            # During printing only the trailing mounted lamp lights up;
+            # follow-through and any extra UV sweeps keep the same lamp.
             lamp_active=segment.curing,
             active_lamp_index=segment.lamp_index,
             curing=segment.curing,
