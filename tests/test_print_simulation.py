@@ -66,42 +66,45 @@ def make_job(folder, layers=3, support_enabled=True):
 
 
 def test_serpentine_head_moves_and_current_layer_progress_is_seekable(tmp_path):
-    _,manifest=make_job(tmp_path/"job")
-    plan=PrintSimulation(manifest,move_speed_mm_s=10,
-                         scan_pitch_mm=1,head_clearance_mm=2)
-    assert plan.rows==2
-    assert plan.path_length_mm==11
-    start=plan.get_frame(0)
-    assert start.layer_index==0
-    assert start.layer_progress==pytest.approx(0)
-    assert start.head_position_mm[:2]==pytest.approx((0,-.5))
-    assert start.head_position_mm[2]==pytest.approx(.2+2)
-    assert plan.total_seconds==pytest.approx(3*(11/10+.25))
-    quarter=plan.get_frame(.25)
-    assert quarter.layer_index==0
-    assert quarter.layer_progress>.0
-    midpoint=plan.get_frame(.5)
-    assert midpoint.layer_index==1
-    assert midpoint.completed_height_mm==pytest.approx(.2)
-    final=plan.get_frame(1)
-    assert final.layer_index==2
-    assert final.completed
-    assert final.current_top_mm==pytest.approx(.6)
-    assert final.completed_height_mm==pytest.approx(.6)
-    assert final.layer_progress==pytest.approx(1)
-    assert plan.position_from_ticks(TIMELINE_TICKS//2).layer_index==1
+    _, manifest = make_job(tmp_path/"job")
+    plan = PrintSimulation(manifest, move_speed_mm_s=10,
+                           scan_pitch_mm=1, head_clearance_mm=2)
+    assert plan.rows == 2
+    assert plan.passes == 6
+    assert plan.total_print_seconds > 0
+    assert plan.total_movement_seconds > 0
+    assert {s.kind for s in plan.segments} >= {"print", "return", "z_move", "stepover"}
+    start = plan.get_frame(0)
+    assert start.layer_index == 0
+    assert start.head_position_mm[:2] == pytest.approx((-10, -.5))
+    assert start.head_position_mm[2] == pytest.approx(.2 + 2)
+    middle = plan.get_frame(plan.step_layer(0, 1))
+    assert middle.layer_index == 1
+    assert middle.completed_height_mm == pytest.approx(.2)
+    end = plan.get_frame(1)
+    assert end.layer_index == 2
+    assert end.completed
+    assert end.completed_height_mm == pytest.approx(.6)
+    assert end.layer_progress == pytest.approx(1)
+    assert end.progress_percent == pytest.approx(100)
+    assert plan.position_from_ticks(TIMELINE_TICKS).completed
 
 
 def test_speed_changes_duration_and_layer_step(tmp_path):
-    _,job=make_job(tmp_path/"job",layers=4)
-    plan=PrintSimulation(job,move_speed_mm_s=20)
-    initial=plan.total_seconds
+    _, job = make_job(tmp_path/"job", layers=4)
+    plan = PrintSimulation(job, move_speed_mm_s=20, print_speed_mm_s=30)
+    before = plan.total_seconds
     plan.set_move_speed(80)
-    assert plan.total_seconds<initial
-    assert plan.get_frame(.5).layer_index==2
-    assert plan.step_layer(.25,1)==pytest.approx(.5)
-    assert format_sim_time(3661)=="01:01:01"
-    for speed in (0,-100,float("nan"),1000):
+    assert plan.total_seconds < before
+    move_duration = plan.total_movement_seconds
+    plan.set_print_speed(120)
+    assert plan.total_movement_seconds == pytest.approx(move_duration)
+    assert plan.total_seconds < before
+    pos = plan.step_layer(0, 2)
+    assert plan.get_frame(pos).layer_index == 2
+    assert plan.step_layer(pos, -1) < pos
+    assert format_sim_time(3661) == "01:01:01"
+    for speed in (0, -100, float("nan"), 5000):
         with pytest.raises(ValueError):
             plan.set_move_speed(speed)
 
@@ -165,7 +168,7 @@ def test_simulation_widget_timeline_controls_without_gpu(tmp_path):
     assert ui.plan.count==5
     assert ui.timeline.isEnabled()
     ui.timeline.setValue(60_000)
-    assert ui.plan.get_frame(ui.elapsed/ui.plan.total_seconds).layer_index==3
+    assert ui.plan.get_frame(ui.elapsed/ui.plan.total_seconds).progress_percent == pytest.approx(60)
     normalized=ui.elapsed/ui.plan.total_seconds
     ui.move_speed.setValue(200)
     assert ui.elapsed/ui.plan.total_seconds==pytest.approx(normalized)
@@ -175,8 +178,9 @@ def test_simulation_widget_timeline_controls_without_gpu(tmp_path):
     assert ui.playing
     ui.pause()
     assert not ui.playing
+    previous_layer = ui.plan.get_frame(ui.elapsed/ui.plan.total_seconds).layer_index
     ui.step_layer(-1)
-    assert ui.plan.get_frame(ui.elapsed/ui.plan.total_seconds).layer_index==2
+    assert ui.plan.get_frame(ui.elapsed/ui.plan.total_seconds).layer_index == previous_layer - 1
     ui.close()
 
 
