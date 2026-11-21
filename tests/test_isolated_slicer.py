@@ -14,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 from uv3d.core import SliceSettings
 from uv3d.gui_slicer import SlicerController
-from uv3d.navigation import PITCH_LIMIT, ORBIT_PER_PIXEL, PRESETS, orbit, zoom, preset
+from uv3d.navigation import PITCH_LIMIT, ORBIT_PER_PIXEL, PRESETS, orbit, zoom, preset, pan_focal_delta
 
 
 def until(app, predicate, deadline=30):
@@ -93,3 +93,13 @@ def test_compatibility_worker_can_retry_after_accelerated_failure(tmp_path):
     assert not failures
     assert succeeded and Path(succeeded[0]).is_file()
     assert "Mode: compatibility" in worker.log_path.read_text(encoding="utf-8")
+
+
+
+def test_pan_changes_orbit_pivot_in_screen_aligned_world_coordinates():
+    # In Top view (almost vertical), screen horizontal is +X for yaw=0.
+    dx, dy, dz = pan_focal_delta(0, 0, 50, 25, 10)
+    assert dx == pytest.approx(-5)
+    assert dy == pytest.approx(0)
+    assert dz == pytest.approx(2.5)
+    assert pan_focal_delta(0, 0, 50, 25, 0) == (0, 0, 0)
