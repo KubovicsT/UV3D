@@ -396,9 +396,12 @@ class MainWindow(QMainWindow):
             mesh, preview_geometry, self.model_height.value(), reset_camera=True)
         self.on_height_changed(reset_layer=True)
         self.export_button.setEnabled(True)
+        # This progress bar is for MASK GENERATION, not for model import.
+        # Previously import completion set it to 100% even when no masks
+        # existed, making a successfully opened STL look like a finished job.
         self.progress.setRange(0, 100)
-        self.progress.setValue(100)
-        self.statusBar().showMessage("3D model loaded (offline)")
+        self.progress.setValue(0)
+        self.statusBar().showMessage("3D model loaded; masks not yet generated")
         self.log.appendPlainText(
             f"Import complete: {len(mesh.faces):,} faces. "
             f"Geometry {durations[0]:.2f} s, preview {durations[1]:.2f} s.")
