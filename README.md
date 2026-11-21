@@ -1,6 +1,6 @@
 # UV3D
 
-**Prototype v0.5 — offline experimental UV slicing. No printhead, motor, UV lamp, or printer control is implemented.**
+**Prototype v0.6 — offline experimental UV slicing. No printhead, motor, UV lamp, or printer control is implemented.**
 
 UV3D targets the Gongzheng H6090EI (three Epson i3200 heads, CMYK/white/varnish), with FlexiPRINT MiniTX GongZheng Edition and Gongzheng PrintExp. It is independent of both vendor applications.
 
@@ -8,7 +8,7 @@ UV3D targets the Gongzheng H6090EI (three Epson i3200 heads, CMYK/white/varnish)
 
 - Windows desktop GUI to import STL, OBJ, GLB, GLTF, 3MF and PLY triangle meshes.
 - **Responsive background imports:** load meshes and simplify preview geometry without blocking the Windows UI. A status message and indeterminate progress bar show which stage is running, and the log records timings. On Windows with OpenGL, the import worker prepares **all original triangles** for the graphics card rather than creating a reduced mesh. The MIT-licensed `fast-simplification` library is retained only for the software fallback. All libraries, including PyOpenGL and OpenCV, are installed into the existing UV3D `runtime/` directory, not system-wide.
-- Interactive orbitable **3D build viewport**: left-drag orbit, right/middle-drag pan, wheel zoom, Reset view.
+- Interactive orbitable **3D build viewport**: right-drag orbit, middle-drag pan, wheel zoom, Reset view.
 - **Set model height in millimeters**: the mesh is scaled uniformly in X/Y/Z and the exact same transformed geometry is used for both preview and exported slices.
 - Slicer-style **vertical layer slider**, synchronized numeric layer selector, translucent full-model silhouette, visible solid portion below the slice and amber highlighted cross-section **before export**.
 - **Supp-style view controls and appearance:** right-drag orbit, middle-drag pan, wheel zoom, Z-up camera with no roll, isometric/top/front/right/fit presets, charcoal-gray background, build grid and XYZ axis markers. Left click is reserved for future selection and transform tools.
@@ -25,7 +25,10 @@ UV3D targets the Gongzheng H6090EI (three Epson i3200 heads, CMYK/white/varnish)
 - Support hollow regions and warn about open geometry.
 - **Large jobs are supported without a fixed total-layer-pixel cap.** The slicer streams one raster layer at a time and saves it before moving to the next, rather than holding all layers in memory. A 60.021 mm tall, 0.05 mm, 300 DPI model can therefore generate 1,201 layers without the former 350-million-layer-pixel rejection.
 - Storage safety: before starting and before every layer, UV3D checks that its output volume has enough free space for one uncompressed layer plus a 512 MiB safety reserve. If space runs low it stops with a clear error and preserves the partial job. The slicer log shows layer dimensions, expected PNG count and uncompressed pixel-data equivalent; actual PNG file sizes vary with compression.
-- Preview exported 2D masks by channel, inspect layers inside the 3D view and simulate job progress with **no printer commands**.
+- Preview exported 2D masks by channel and inspect slices inside the main 3D view.
+- **Interactive 3D print simulation**: replay existing complete jobs with the original-resolution colored model, a moving cuboid printhead, progressive layer deposition, a translucent purple support volume, and the actual white/color/support PNGs for each in-progress layer.
+- **Timeline and controls**: pause, replay, skip layers or drag the timeline to any point. Set illustrative printhead travel in mm/s independently of playback speed (virtual time × multiplier). Camera uses the same right-orbit/middle-pan/wheel controls as Supp.
+- **Appearance**: choose sacrificial-support tint and 0–100% opacity without regenerating slices; optional ghost of the unprinted model; choose a fallback model color for untextured STL. Original available vertex/face colors are kept for PLY/OBJ/GLB as far as existing geometry reader supports.
 - Read-only machine profile: 600 x 900 mm nominal bed, 3 heads, 4,841.455 Z motor pulses/mm (observed factory configuration).
 - **Update** button: portable Git fetches origin/main, fast-forwards only, refreshes folder-local dependencies if necessary, then restarts. No UV3D releases.
 
@@ -108,6 +111,22 @@ The exported masks now have an explicit regression test with a wide roof on a na
 ## Diagnosing slow imports
 
 Open a model, then check the import messages in the slicer log. It records **geometry load seconds** and **preview preparation seconds** separately so you can see which stage needs additional optimization. Large files may still take time to read or upload to GPU memory, but the import worker keeps most of the processing off the UI thread. Only one import/export task runs at a time; the program intentionally prevents shutdown while the worker is active.
+
+## Print queue — interactive 3D simulation
+
+After generating masks, open the **Print queue — simulation** tab. UV3D loads the new `job.json` automatically. You can also click **Open existing job.json** to revisit a completed job under `workspace/jobs`. The original mesh is loaded from the locally saved job source path (or original task record); keep that source file available. Print simulation never contacts the machine.
+
+The 3D viewport shows a simplified cuboid representing the printhead, traveling along an **illustrative serpentine path** above the model. The simulation reveals full-resolution model surface geometry below completed layer height and paints the current layer progressively from the actual exported mask files. The model preserves source face/vertex colors when available; STL generally has no embedded display color, so use **Uncolored model tint**. Full UV-mapped textures are still not accurately reproduced.
+
+A filled 3D sacrificial-support surface is generated from a **sampled/downscaled set of support masks** for smooth display, colored independently with adjustable opacity. The model's original triangle geometry is **not simplified** for Windows OpenGL rendering, but support preview geometry is deliberately coarse. The current printed layer uses the full material masks reduced only for on-screen GPU texturing; original exported PNGs remain unchanged.
+
+- **Timeline**: 0 to 100,000 steps, freely scrubbable; play, pause, replay and layer-step buttons
+- **Printhead movement (mm/s)**: changes the *virtual* motion/total job time
+- **Replay speed (×)**: changes how quickly virtual time advances in real time
+- **Support color / support opacity**: changes only the viewer; 0% hides the sacrificial material and 100% makes it opaque
+- **Show unprinted model silhouette**: toggles a faint ghost for reference before a layer is deposited
+
+This is a conceptual layer-by-layer animation, **not** a Hoson/PrintExp toolpath, a verified Epson printhead scan pattern, a genuine print-time estimate or machine control. Simulated layer-change delay, scan pitch and head clearance are display assumptions. Do not use simulated dimensions or movement as a safety setting.
 
 ## Large-job slicing and disk space
 
