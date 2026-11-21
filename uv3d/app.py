@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 from datetime import datetime
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Qt
@@ -18,7 +19,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 from .core import MachineProfile, SliceSettings, load_mesh, prepare_mesh, slice_model
-from .viewport import ModelViewport
+from .viewport import ModelViewport, build_preview_geometry
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE = ROOT / "workspace"
@@ -42,6 +43,33 @@ class SliceWorker(QObject):
             self.error.emit(f"{type(exc).__name__}: {exc}")
 
 
+class ImportWorker(QObject):
+    """Load and simplify full-resolution files without blocking Qt's event loop."""
+    stage = Signal(str)
+    finished = Signal(object, object, object, object, object)
+    error = Signal(str)
+
+    def __init__(self, filename: str):
+        super().__init__()
+        self.filename = filename
+
+    def run(self):
+        try:
+            self.stage.emit("Loading and checking 3D geometry...")
+            begin = time.perf_counter()
+            mesh, warnings = load_mesh(self.filename)
+            read_seconds = time.perf_counter() - begin
+            self.stage.emit(f"Preparing interactive preview ({len(mesh.faces):,} triangles)...")
+            begin = time.perf_counter()
+            preview = build_preview_geometry(
+                mesh, max_faces=ModelViewport.PREVIEW_TRIANGLES)
+            preview_seconds = time.perf_counter() - begin
+            self.finished.emit(self.filename, mesh, preview, warnings,
+                               (read_seconds, preview_seconds))
+        except Exception as exc:
+            self.error.emit(f"{type(exc).__name__}: {exc}")
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -54,6 +82,9 @@ class MainWindow(QMainWindow):
         self.job_data: dict | None = None
         self.worker_thread = None
         self.worker = None
+        self.import_thread = None
+        self.import_worker = None
+        self.source_preview = None
         self.sim_position = 0
         self.sim_timer = QTimer(self)
         self.sim_timer.timeout.connect(self.simulation_tick)
@@ -78,6 +109,7 @@ class MainWindow(QMainWindow):
         left = QWidget()
         controls = QVBoxLayout(left)
         open_button = QPushButton("Open 3D model…")
+        self.open_button = open_button
         open_button.clicked.connect(self.open_model)
         controls.addWidget(open_button)
         self.model_info = QLabel("No model loaded.\nSTL, OBJ, GLB, GLTF, 3MF, PLY")
@@ -275,38 +307,83 @@ class MainWindow(QMainWindow):
             self.load_model_file(filename)
 
     def load_model_file(self, filename: str | Path):
-        """Public entry point shared by Open dialog and GUI smoke tests."""
-        if self.worker_thread is not None:
-            QMessageBox.warning(self, "Busy", "Finish generating layers before importing a new model.")
+        """Start an asynchronous import; returns immediately, keeping UI usable."""
+        if self.worker_thread is not None or self.import_thread is not None:
+            QMessageBox.warning(self, "Busy", "Finish the current export/import before opening another model.")
             return
-        try:
-            mesh, warnings = load_mesh(filename)
-        except Exception as exc:
-            QMessageBox.critical(self, "Model import failed", str(exc))
-            return
+        self.open_button.setEnabled(False)
+        self.export_button.setEnabled(False)
+        self.model_info.setText(f"Loading model:\n{Path(filename).name}\nYou can still use the window.")
+        self.statusBar().showMessage("Loading 3D model in the background...")
+        self.progress.setRange(0, 0)
+        self.log.appendPlainText(f"Import started: {filename}")
+        thread = QThread(self)
+        worker = ImportWorker(str(filename))
+        self.import_thread = thread
+        self.import_worker = worker
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.stage.connect(self.import_stage)
+        worker.finished.connect(self.import_finished)
+        worker.error.connect(self.import_failed)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self.import_thread_finished)
+        thread.start()
+
+    def import_stage(self, stage: str):
+        self.model_info.setText(stage)
+        self.statusBar().showMessage(stage)
+
+    def import_finished(self, filename, mesh, preview_geometry, warnings, durations):
         self.mesh_path = Path(filename)
         self.source_mesh = mesh
+        self.source_preview = preview_geometry
         self.model_height.blockSignals(True)
-        # Actual model height can be greater than the tested nominal clearance.
-        # Clamp only the editor target; never silently export the original geometry.
         self.model_height.setValue(min(max(float(mesh.extents[2]), 0.05), 180.0))
         self.model_height.setEnabled(True)
         self.model_height.blockSignals(False)
-        self.on_height_changed(reset_camera=True, reset_layer=True)
+        self.viewport.set_scene(
+            mesh, preview_geometry, self.model_height.value(), reset_camera=True)
+        self.on_height_changed(reset_layer=True)
         self.export_button.setEnabled(True)
-        self.log.appendPlainText(f"Imported: {filename}")
+        self.progress.setRange(0, 100)
+        self.progress.setValue(100)
+        self.statusBar().showMessage("3D model loaded (offline)")
+        self.log.appendPlainText(
+            f"Import complete: {len(mesh.faces):,} faces. "
+            f"Geometry {durations[0]:.2f} s, preview {durations[1]:.2f} s.")
         for warning in warnings:
             self.log.appendPlainText("WARNING: " + warning)
+
+    def import_failed(self, problem: str):
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.statusBar().showMessage("Failed to import 3D model")
+        self.log.appendPlainText("ERROR importing model: " + problem)
+        QMessageBox.critical(self, "Model import failed", problem)
+
+    def import_thread_finished(self):
+        self.import_thread = None
+        self.import_worker = None
+        self.open_button.setEnabled(True)
+        self.export_button.setEnabled(self.mesh_path is not None and self.worker_thread is None)
 
     def on_height_changed(self, *_, reset_camera=False, reset_layer=False):
         if self.source_mesh is None:
             return
-        target = self.model_height.value()
         try:
-            self.preview_mesh = prepare_mesh(self.source_mesh, target)
-            self.viewport.set_mesh(self.preview_mesh, reset_camera=reset_camera)
+            if self.viewport.original_mesh is not self.source_mesh:
+                self.viewport.set_scene(
+                    self.source_mesh, self.source_preview,
+                    self.model_height.value(), reset_camera=reset_camera)
+            else:
+                self.viewport.set_model_height(self.model_height.value())
+            self.preview_mesh = self.viewport.mesh
         except Exception as exc:
-            self.log.appendPlainText("Unable to resize mesh: " + str(exc))
+            self.log.appendPlainText("Unable to resize model: " + str(exc))
             return
         orig = self.source_mesh.extents
         dims = self.preview_mesh.extents
@@ -315,8 +392,8 @@ class MainWindow(QMainWindow):
             f"{self.mesh_path.name if self.mesh_path else 'Model'}\n"
             f"Original: {orig[0]:.2f} × {orig[1]:.2f} × {orig[2]:.2f} mm\n"
             f"Resized: {dims[0]:.2f} × {dims[1]:.2f} × {dims[2]:.2f} mm\n"
-            f"Uniform scale: {scale:.4f}×    Faces: {len(self.preview_mesh.faces):,}\n"
-            f"Watertight: {self.preview_mesh.is_watertight}"
+            f"Uniform scale: {scale:.4f}×    Faces: {len(self.source_mesh.faces):,}\n"
+            f"Watertight: {self.source_mesh.is_watertight}"
         )
         self.refresh_layer_range(reset_index=reset_layer)
 
@@ -462,6 +539,10 @@ class MainWindow(QMainWindow):
             self.sim_timer.stop()
 
     def closeEvent(self, event):
+        if self.import_thread is not None and self.import_thread.isRunning():
+            QMessageBox.warning(self, "Import in progress", "Wait for the import to finish before closing UV3D.")
+            event.ignore()
+            return
         if self.worker_thread is not None and self.worker_thread.isRunning():
             QMessageBox.warning(self, "Export in progress", "Finish exporting layers before closing UV3D.")
             event.ignore()
@@ -473,8 +554,8 @@ class MainWindow(QMainWindow):
         if not script.is_file() or sys.platform != "win32":
             QMessageBox.warning(self, "Update unavailable", "Windows updater script not found.")
             return
-        if self.worker_thread is not None:
-            QMessageBox.warning(self, "Busy", "Finish layer generation before updating.")
+        if self.worker_thread is not None or self.import_thread is not None:
+            QMessageBox.warning(self, "Busy", "Finish model import/export before updating.")
             return
         if QMessageBox.question(self, "Update from main",
                                 "UV3D will close, fast-forward from GitHub/main, check dependencies "
