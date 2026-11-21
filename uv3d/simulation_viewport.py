@@ -156,8 +156,8 @@ def uv_footprints(frame, gantry, raster_min_x, raster_min_y,
                   raster_max_x, raster_max_y):
     """Visible XY overlap of lit lamp footprints with the printed layer.
 
-    Non-print travel has lamps OFF. Print segments illuminate using all enabled
-    lamps; a dedicated curing sweep lights only the lamp assigned to it.
+    Lamps remain OFF during printing and repositioning. Each dedicated
+    post-pass curing sweep lights only the configured lamp assigned to it.
     """
     if frame is None or not frame.lamp_active:
         return []
