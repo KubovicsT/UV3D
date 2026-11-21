@@ -56,6 +56,8 @@ class SimulationFrame:
     elapsed_print_s: float = 0.0
     remaining_virtual_s: float = 0.0
     pass_index: int = 0
+    scan_direction: int = 1             # +1 scans left->right, -1 right->left
+    passes_completed: int = 0          # completed printing passes in current band
 
 
 class PrintSimulation:
@@ -69,6 +71,7 @@ class PrintSimulation:
         scan_pitch_mm: float | None = None, head_clearance_mm: float = 2.0,
         print_speed_mm_s: float = 300.0, passes: int = 6,
         overscan_mm: float = 10.0, head_spec: PrintHeadSpec | None = None,
+        print_mode: str = "bidirectional",
     ):
         self.layers = manifest.get("layers", [])
         if not self.layers:
@@ -101,6 +104,7 @@ class PrintSimulation:
         self.rows = max(1, math.ceil(self.depth / self.scan_pitch_mm))
         self.row_step = self.depth / self.rows
         self.passes = self._validate_passes(passes)
+        self.print_mode = self._validate_print_mode(print_mode)
         self.print_speed_mm_s = self._validate_speed(print_speed_mm_s)
         self.move_speed_mm_s = self._validate_speed(move_speed_mm_s)
         self.segments: list[MotionSegment] = []
@@ -123,6 +127,12 @@ class PrintSimulation:
             raise ValueError("Passes per band must be 1–32.")
         return int(value)
 
+    @staticmethod
+    def _validate_print_mode(mode: str) -> str:
+        if mode not in ("bidirectional", "unidirectional"):
+            raise ValueError("Printing direction must be bidirectional or unidirectional.")
+        return mode
+
     def set_print_speed(self, value: float):
         self.print_speed_mm_s = self._validate_speed(value)
         self._build_path()
@@ -135,12 +145,19 @@ class PrintSimulation:
         self.passes = self._validate_passes(value)
         self._build_path()
 
+    def set_print_mode(self, value: str):
+        self.print_mode = self._validate_print_mode(value)
+        self._build_path()
+
     def configure(self, print_speed_mm_s: float, move_speed_mm_s: float,
-                  passes: int):
+                  passes: int, print_mode: str | None = None):
         """Validate and recompute the timeline just once for a UI change."""
         printing = self._validate_speed(print_speed_mm_s)
         travel = self._validate_speed(move_speed_mm_s)
         passes = self._validate_passes(passes)
+        mode = self._validate_print_mode(print_mode if print_mode is not None
+                                         else self.print_mode)
+        self.print_mode = mode
         self.print_speed_mm_s = printing
         self.move_speed_mm_s = travel
         self.passes = passes
@@ -203,9 +220,14 @@ class PrintSimulation:
             for band in range(self.rows):
                 y = self.max_y - (band + .5) * self.row_step
                 for pass_index in range(self.passes):
-                    # Boustrophedon scan: never teleport at a pass boundary.
-                    target_x = right if pass_index % 2 == 0 else left
-                    start_x = left if pass_index % 2 == 0 else right
+                    # Bidirectional: alternate print direction EVERY pass,
+                    # including the transition between adjacent swath bands.
+                    # Unidirectional: every pass prints left->right; the
+                    # carriage must travel back without printing in between.
+                    forward = (self.print_mode == "unidirectional"
+                               or (band * self.passes + pass_index) % 2 == 0)
+                    start_x = left if forward else right
+                    target_x = right if forward else left
                     if (abs(last_xyz[0] - start_x) > 1e-9
                             or abs(last_xyz[1] - y) > 1e-9):
                         add("stepover" if band else "travel", layer,
@@ -251,15 +273,25 @@ class PrintSimulation:
         if complete:
             below = height
             layer_progress = 1.0
-        direction_right = segment.end_xyz[0] >= segment.start_xyz[0]
         if segment.printing:
-            print_fraction = (xyz[0] - segment.start_xyz[0]) / (
-                segment.end_xyz[0] - segment.start_xyz[0])
-            scan_fraction = (segment.pass_index + alpha) / self.passes
+            direction = 1 if segment.end_xyz[0] > segment.start_xyz[0] else -1
+            # Head X is referenced to the ACTUAL raster bounds (not
+            # overscan distance), so the same physical pixel is revealed
+            # exactly when the printhead reaches it in either direction.
+            raster_left = self.min_x
+            if direction == 1:
+                scan_fraction = (xyz[0] - raster_left) / self.width
+            else:
+                scan_fraction = (raster_left + self.width - xyz[0]) / self.width
+            scan_fraction = max(0.0, min(1.0, scan_fraction))
+            completed_passes = segment.pass_index
         else:
-            print_fraction = 1.0 if direction_right else 0.0
-            # Show completed band after all printing passes, even during return.
-            scan_fraction = min(1.0, (segment.pass_index + 1) / self.passes)
+            # A travel/stepover precedes the next pass. Return and Z moves
+            # follow the LAST pass; no more deposition occurs there.
+            direction = 1
+            scan_fraction = 0.0
+            completed_passes = (self.passes if segment.kind in ("return", "z_move")
+                                else segment.pass_index)
         return SimulationFrame(
             layer_index=layer, layer_count=self.count,
             layer_progress=layer_progress,
@@ -280,6 +312,8 @@ class PrintSimulation:
                 (segment.duration_s * (1.0 - alpha) if segment.printing else 0.0)),
             remaining_virtual_s=max(0.0, total-t),
             pass_index=segment.pass_index,
+            scan_direction=direction,
+            passes_completed=completed_passes,
         )
 
     def step_layer(self, timeline_fraction: float, amount: int) -> float:
