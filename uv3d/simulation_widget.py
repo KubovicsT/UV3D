@@ -288,6 +288,8 @@ class SimulationWidget(QWidget):
         self.timeline.setRange(0,TIMELINE_TICKS)
         self.timeline.setEnabled(False)
         self.timeline.valueChanged.connect(self.timeline_changed)
+        self.timeline.sliderPressed.connect(self.timeline_pressed)
+        self.timeline.sliderReleased.connect(self.timeline_released)
         timeline_row.addWidget(self.timeline,stretch=1)
         self.duration_label = QLabel("00:00:00")
         timeline_row.addWidget(self.duration_label)
@@ -301,8 +303,15 @@ class SimulationWidget(QWidget):
         self.timer.timeout.connect(self._tick)
         self._texture_delay = QTimer(self)
         self._texture_delay.setSingleShot(True)
-        self._texture_delay.setInterval(35)
+        # File decoding and GPU texture uploads must not follow every mouse
+        # movement. Coalesce fast seeks into one final requested layer.
+        self._texture_delay.setInterval(180)
         self._texture_delay.timeout.connect(self._start_texture_load)
+        self._scrub_timer = QTimer(self)
+        self._scrub_timer.setInterval(33)
+        self._scrub_timer.setSingleShot(True)
+        self._scrub_timer.timeout.connect(self._flush_scrub_frame)
+        self._scrub_pending = False
 
     @property
     def busy(self):
@@ -340,6 +349,9 @@ class SimulationWidget(QWidget):
         self.plan = plan
         self.job_path = job_path
         self._scene_ready = False
+        self._texture_delay.stop()
+        self._scrub_timer.stop()
+        self._scrub_pending = False
         if self.viewport is not None:
             # Do not draw the previous model while a different job is loading.
             self.viewport.frame = None
@@ -417,13 +429,18 @@ class SimulationWidget(QWidget):
     def _request_texture(self,index):
         if self.viewport is None or self.job_path is None:
             return
+        if self.timeline.isSliderDown():
+            # The geometry can seek immediately, but do not open hundreds of
+            # PNGs as the mouse crosses hundreds of layers in one drag.
+            return
         self._wanted_texture_layer = int(index)
         if self._loaded_texture_layer == index:
             return
         self._texture_delay.start()
 
     def _start_texture_load(self):
-        if self._texture_thread is not None or self.job_path is None:
+        if (self.timeline.isSliderDown() or self._texture_thread is not None
+                or self.job_path is None or not self._scene_ready):
             return
         index = self._wanted_texture_layer
         if index < 0 or index == self._loaded_texture_layer:
@@ -457,10 +474,11 @@ class SimulationWidget(QWidget):
 
     def _texture_thread_finished(self):
         self._texture_thread = self._texture_worker = None
-        if self._loaded_texture_layer != self._wanted_texture_layer:
-            self._texture_delay.start(10)
+        if (not self.timeline.isSliderDown()
+                and self._loaded_texture_layer != self._wanted_texture_layer):
+            self._texture_delay.start(100)
 
-    def _update_frame(self):
+    def _update_frame(self, *, update_viewport=True):
         if self.plan is None:
             return
         frame = self.plan.get_frame(self.elapsed / self.plan.total_seconds)
@@ -475,17 +493,49 @@ class SimulationWidget(QWidget):
             f"({frame.layer_progress*100:.1f}% of layer). "
             f"Printhead X {hx:.1f}, Y {hy:.1f}, Z {hz:.2f} mm "
             f"· {frame.rows_per_layer} simulated scan rows.")
-        if self.viewport is not None and self._scene_ready:
+        if update_viewport and self.viewport is not None and self._scene_ready:
             self.viewport.set_frame(frame)
             if frame.layer_index != self._wanted_texture_layer:
                 self._request_texture(frame.layer_index)
+
+    def timeline_pressed(self):
+        # Pause playback to avoid timer races with user-controlled seeking.
+        self.pause()
+        self._texture_delay.stop()
+        self._scrub_timer.stop()
+        self._scrub_pending = False
+
+    def timeline_released(self):
+        # Only decode the final layer after the user finishes the drag.
+        self._scrub_timer.stop()
+        self._scrub_pending = False
+        self._update_frame()
+        if self.plan is not None:
+            frame = self.plan.get_frame(self.elapsed / self.plan.total_seconds)
+            self._request_texture(frame.layer_index)
+            # The last selected layer takes precedence over any stale loader.
+            if self._texture_thread is None:
+                self._texture_delay.start(20)
+
+    def _flush_scrub_frame(self):
+        if self._scrub_pending and self.plan is not None:
+            self._scrub_pending = False
+            self._update_frame()
 
     def timeline_changed(self,ticks):
         if self.plan is None:
             return
         self.elapsed = (ticks / TIMELINE_TICKS) * self.plan.total_seconds
         self._last_clock = time.monotonic()
-        self._update_frame()
+        if self.timeline.isSliderDown():
+            # Labels update immediately, but GPU redraws are limited to ~30Hz.
+            # We deliberately avoid layer PNG decoding until release.
+            self._update_frame(update_viewport=False)
+            self._scrub_pending = True
+            if not self._scrub_timer.isActive():
+                self._scrub_timer.start()
+        else:
+            self._update_frame()
 
     def speed_changed(self,value):
         if self.plan is None:
