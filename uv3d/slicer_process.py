@@ -52,6 +52,10 @@ def run_request(request_path: str | Path) -> int:
                        elapsed_seconds=round(time.perf_counter() - start, 2))
                 logfile.write(f"layer {current}/{total}\n")
 
+        def on_stage(message: str) -> None:
+            logfile.write("STAGE: " + message + "\n")
+            report("stage", message=message)
+
         def on_plan(plan) -> None:
             message = (
                 f"Preparing {plan.layers:,} layers at "
@@ -73,7 +77,7 @@ def run_request(request_path: str | Path) -> int:
             report("stage", message="Using " + ("compatibility" if compatibility_mode else "accelerated") + " slicing")
             fn = _slice_model_legacy if compatibility_mode else slice_model
             result = fn(source, output, options, on_progress=on_progress,
-                        on_plan=on_plan)
+                        on_plan=on_plan, on_stage=on_stage)
             if not result.exists():
                 raise RuntimeError("Slicer did not produce a job manifest")
             logfile.write("SUCCESS\n")
