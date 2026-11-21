@@ -226,13 +226,25 @@ class SimulationViewport(GpuModelViewport):
         # tiny imported model. Fit both the model and the head into the
         # initial camera framing, without changing their physical dimensions.
         from .simulation_engine import PrintHeadSpec
-        spec = PrintHeadSpec()
         dims = self.mesh.extents
         magnitude = max(float(max(dims[:2])), float(dims[2]) * 1.45, .0001)
+        hlist = [h for h in self._gantry_config.heads if h.enabled]
+        lamps = [l for l in self._gantry_config.lamps if l.enabled]
+        extents_x = [(h.offset_x_mm-h.width_mm/2,
+                      h.offset_x_mm+h.width_mm/2) for h in hlist]
+        extents_y = [(h.offset_y_mm-h.depth_mm/2,
+                      h.offset_y_mm+h.depth_mm/2) for h in hlist]
+        extents_x += [(l.offset_x_mm-l.width_mm/2,
+                       l.offset_x_mm+l.width_mm/2) for l in lamps]
+        extents_y += [(l.offset_y_mm-l.depth_mm/2,
+                       l.offset_y_mm+l.depth_mm/2) for l in lamps]
+        full_x = max(e[1] for e in extents_x) - min(e[0] for e in extents_x)
+        full_y = max(e[1] for e in extents_y) - min(e[0] for e in extents_y)
+        tall = max((h.height_mm for h in hlist),default=35.6)
         span_with_head = max(
-            float(dims[0]) + spec.body_x_mm,
-            float(dims[1]) + spec.body_y_mm,
-            float(dims[2]) + spec.body_z_mm)
+            float(dims[0]) + full_x,
+            float(dims[1]) + full_y,
+            float(dims[2]) + tall + 8)
         self.zoom = min(1.0, magnitude / max(magnitude, span_with_head) * 0.92)
         self._raster = manifest
         self._sim_passes = 6
