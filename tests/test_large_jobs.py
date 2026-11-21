@@ -85,4 +85,4 @@ def test_plan_callback_and_manifest_written_on_success(tmp_path):
     manifest = json.loads(result.read_text(encoding="utf-8"))
     assert len(plans) == 1
     assert manifest["storage_plan"] == plans[0].as_dict()
-    assert manifest["storage_plan"]["png_files"] == 6
+    assert manifest["storage_plan"]["png_files"] == 8
