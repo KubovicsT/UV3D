@@ -7,10 +7,12 @@ cross-sections are computed from the FULL transformed mesh.
 from __future__ import annotations
 
 import math
+import threading
+from types import SimpleNamespace
 
 import numpy as np
 import trimesh
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
@@ -33,7 +35,7 @@ def clip_triangle_below(triangle: np.ndarray, z: float) -> np.ndarray:
     return np.asarray(result, dtype=float)
 
 
-def build_preview_geometry(mesh: trimesh.Trimesh, max_faces: int = 7000):
+def build_preview_geometry(mesh: trimesh.Trimesh, max_faces: int = 3000):
     """Return connected low-detail surface triangles, normals and source colors.
 
     Quantized-vertex clustering keeps neighboring faces joined. This is
@@ -72,7 +74,7 @@ def build_preview_geometry(mesh: trimesh.Trimesh, max_faces: int = 7000):
     hi = max(extent / 3, 1e-7)
     best = None
     # More cells = more detail. Find the highest usable triangle count.
-    for _ in range(8):
+    for _ in range(5):
         step = math.sqrt(lo * hi)
         candidate = cluster(step)
         count = len(candidate[0]) if candidate else 0
@@ -100,14 +102,23 @@ def build_preview_geometry(mesh: trimesh.Trimesh, max_faces: int = 7000):
 class ModelViewport(QWidget):
     """Orbits with left drag, pans with right drag and zooms with wheel."""
 
-    PREVIEW_TRIANGLES = 7000
+    PREVIEW_TRIANGLES = 3000
+    cap_ready = Signal(int, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(360, 320)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WA_OpaquePaintEvent)
-        self.mesh = None
+        self.mesh = None  # Lightweight bounding-box proxy, never millions of faces.
+        self.original_mesh = None
+        self._base_preview = None
+        self._base_min_z = 0.0
+        self._scale = 1.0
+        self._cap_revision = 0
+        self._cap_running = False
+        self._cap_pending = False
+        self.cap_ready.connect(self._finish_cap)
         self.triangles = None
         self.normals = None
         self.face_colors = None
@@ -122,23 +133,48 @@ class ModelViewport(QWidget):
         self._cap_polys = []
         self._cap_timer = QTimer(self)
         self._cap_timer.setSingleShot(True)
-        self._cap_timer.setInterval(90)
+        self._cap_timer.setInterval(250)
         self._cap_timer.timeout.connect(self._rebuild_cap)
 
-    def set_mesh(self, mesh: trimesh.Trimesh | None, reset_camera: bool = False) -> None:
-        self.mesh = mesh
+    def set_scene(self, source_mesh: trimesh.Trimesh,
+                  preview_geometry: tuple, target_height_mm: float,
+                  reset_camera: bool = False) -> None:
+        """Install an already simplified preview without costly GUI-thread work."""
+        self.original_mesh = source_mesh
+        self._base_preview = preview_geometry
+        self._base_min_z = float(source_mesh.bounds[0, 2])
+        self._cap_revision += 1
         self._cap_timer.stop()
         self._cap_polys = []
-        if mesh is None:
-            self.triangles = self.normals = self.face_colors = None
-            self.update()
-            return
-        self.triangles, self.normals, self.face_colors = build_preview_geometry(
-            mesh, max_faces=self.PREVIEW_TRIANGLES)
+        self.set_model_height(target_height_mm)
         if reset_camera:
             self.reset_camera()
-        else:
-            self.set_layer_z(min(self.slice_z, float(mesh.extents[2])))
+        self.update()
+
+    def set_model_height(self, target_height_mm: float) -> None:
+        """Reuse the same preview triangles for height changes (O(3000))."""
+        if self.original_mesh is None or self._base_preview is None:
+            return
+        source = self.original_mesh
+        original_height = float(source.extents[2])
+        if not 0.05 <= target_height_mm <= 180.0 or original_height <= 0:
+            raise ValueError("Invalid model height")
+        self._scale = float(target_height_mm / original_height)
+        base, normals, colors = self._base_preview
+        self.triangles = np.asarray(base, dtype=float) * self._scale
+        self.triangles[:, :, 2] -= self._base_min_z * self._scale
+        self.normals = normals
+        self.face_colors = colors
+        raw_bounds = np.asarray(source.bounds, dtype=float)
+        bounds = raw_bounds * self._scale
+        bounds[:, 2] -= self._base_min_z * self._scale
+        self.mesh = SimpleNamespace(
+            bounds=bounds,
+            extents=bounds[1] - bounds[0],
+        )
+        self._cap_revision += 1
+        self._cap_polys = []
+        self.set_layer_z(min(self.slice_z, float(target_height_mm)))
         self.update()
 
     def reset_camera(self):
@@ -168,16 +204,44 @@ class ModelViewport(QWidget):
         self.update()
 
     def _rebuild_cap(self):
-        if self.mesh is None or not self.slice_mode:
+        """Full-mesh cap calculation runs off the GUI thread and is debounced.
+
+        At most one calculation runs at a time. Further slider changes only
+        replace the desired layer; outdated results are discarded.
+        """
+        if self.original_mesh is None or not self.slice_mode:
             return
-        z = min(max(self.slice_z, 1e-7), float(self.mesh.extents[2]) - 1e-7)
-        try:
-            segs, _ = trimesh.intersections.mesh_plane(
-                self.mesh, [0, 0, 1], [0, 0, z], return_faces=True)
-            self._cap_polys = _polygons_from_segments(segs)
-        except Exception:
-            self._cap_polys = []
-        self.update()
+        if self._cap_running:
+            self._cap_pending = True
+            return
+        self._cap_running = True
+        self._cap_pending = False
+        revision = self._cap_revision
+        source = self.original_mesh
+        scale = self._scale
+        z = self._base_min_z + self.slice_z / scale
+        z = min(max(z, float(source.bounds[0, 2]) + 1e-7),
+                float(source.bounds[1, 2]) - 1e-7)
+        # Local bindings keep source mesh alive until background task completes.
+        def compute():
+            try:
+                segments, _ = trimesh.intersections.mesh_plane(
+                    source, [0, 0, 1], [0, 0, z], return_faces=True)
+                polygons = _polygons_from_segments(segments)
+                self.cap_ready.emit(revision, polygons)
+            except Exception:
+                self.cap_ready.emit(revision, [])
+
+        threading.Thread(target=compute, name="UV3D-cap-preview", daemon=True).start()
+
+    def _finish_cap(self, revision: int, polygons):
+        self._cap_running = False
+        if revision == self._cap_revision and self.slice_mode:
+            self._cap_polys = polygons
+            self.update()
+        if (self._cap_pending or revision != self._cap_revision) and self.slice_mode:
+            self._cap_pending = False
+            self._cap_timer.start(15)
 
     def mousePressEvent(self, event):
         if event.button() in (Qt.LeftButton, Qt.MiddleButton, Qt.RightButton):
@@ -315,7 +379,7 @@ class ModelViewport(QWidget):
         for poly in self._cap_polys:
             for ring in [poly.exterior, *poly.interiors]:
                 z = np.full(len(ring.coords), self.slice_z)
-                xy = np.asarray(ring.coords)
+                xy = np.asarray(ring.coords) * self._scale
                 pts = np.column_stack((xy, z))
                 path.addPolygon(self._polygon(self._project(pts)))
                 path.closeSubpath()
