@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 from .core import MachineProfile, SliceSettings, load_mesh
 from .gui_slicer import SlicerController
 from .support_preview import build_support_wireframe
-from .simulation_widget import SimulationWidget
+from .simulation_process_panel import SimulationProcessPanel
 from .diagnostics import install_gui_diagnostics
 from .viewport import ModelViewport as SoftwareModelViewport, build_preview_geometry
 
@@ -348,7 +348,7 @@ class MainWindow(QMainWindow):
         self.viewport.reset_camera()
 
     def build_simulator(self):
-        self.simulator = SimulationWidget(
+        self.simulator = SimulationProcessPanel(
             ROOT, self, gpu_enabled=getattr(ModelViewport, "FULL_RESOLUTION", False))
         return self.simulator
 
@@ -702,7 +702,7 @@ class MainWindow(QMainWindow):
                                     "Let the simulation preview finish loading before closing.")
             event.ignore()
             return
-        self.simulator.pause()
+        self.simulator.shutdown()
         if (self.support_preview_thread is not None
                 and self.support_preview_thread.isRunning()):
             QMessageBox.information(self, "Support preview preparing",
