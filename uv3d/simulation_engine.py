@@ -1,52 +1,85 @@
-"""Purely virtual UV3D material-jetting timeline.
+"""Deterministic seekable *estimated* Epson i3200-U1 material-jet timeline.
 
-All positions and speeds are illustrative. No real PrintExp movement, ink
-passes, carriage geometry or curing parameters are assumed or controlled.
-The scan path is a conceptual left/right serpentine over each raster.
+No printer data, motion commands, real acceleration or UV curing: scan speed,
+travel speed, passes, print width and head physical envelope are assumptions
+for a useful offline preview. Full return motions are explicit segments.
 """
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass
 import math
-
 
 TIMELINE_TICKS = 100_000
 
 
 @dataclass(frozen=True)
+class PrintHeadSpec:
+    name: str = "Epson i3200-U1"
+    body_x_mm: float = 69.1
+    body_y_mm: float = 59.5
+    body_z_mm: float = 35.6
+    swath_mm: float = 33.8
+
+
+@dataclass(frozen=True)
+class MotionSegment:
+    kind: str                     # print, travel, stepover, return, z_move
+    layer_index: int
+    start_xyz: tuple[float, float, float]
+    end_xyz: tuple[float, float, float]
+    speed_mm_s: float
+    duration_s: float
+    band_index: int
+    pass_index: int
+    printing: bool
+
+
+@dataclass(frozen=True)
 class SimulationFrame:
-    layer_index: int              # zero-based, inclusive
+    layer_index: int
     layer_count: int
-    layer_progress: float         # printed fraction of this layer by travel
-    completed_height_mm: float    # fully completed layers only
+    layer_progress: float
+    completed_height_mm: float
     current_top_mm: float
     head_position_mm: tuple[float, float, float]
-    row_index: int                # zero-based printed scan row
-    row_fraction: float           # 0..1 along that row
+    row_index: int
+    row_fraction: float
     rows_per_layer: int
     elapsed_virtual_s: float
     total_virtual_s: float
     timeline_fraction: float
     completed: bool
+    motion_kind: str = "print"
+    printing: bool = False
+    progress_percent: float = 0.0
+    elapsed_print_s: float = 0.0
+    remaining_virtual_s: float = 0.0
+    pass_index: int = 0
 
 
 class PrintSimulation:
-    """Independent movement and playback speeds with an arbitrary seek position."""
+    """Continuous motion: print across X, move between passes/bands, return,
+    then change Z. Both speeds modify actual segment durations. Binary-searched
+    timeline seeking remains fast even over 1000+ layers.
+    """
 
-    def __init__(self, manifest: dict, move_speed_mm_s: float = 100.0,
-                 scan_pitch_mm: float = 2.0, head_clearance_mm: float = 2.0):
-        layers = manifest.get("layers", [])
-        if not layers:
+    def __init__(
+        self, manifest: dict, move_speed_mm_s: float = 600.0,
+        scan_pitch_mm: float | None = None, head_clearance_mm: float = 2.0,
+        print_speed_mm_s: float = 300.0, passes: int = 6,
+        overscan_mm: float = 10.0, head_spec: PrintHeadSpec | None = None,
+    ):
+        self.layers = manifest.get("layers", [])
+        if not self.layers:
             raise ValueError("A completed layer-mask job is required for simulation.")
-        self.layers = layers
-        self.count = len(layers)
+        self.count = len(self.layers)
         info = manifest["settings"]
         self.layer_mm = float(info["layer_mm"])
         self.dpi = int(info["dpi"])
         if self.dpi <= 0 or self.layer_mm <= 0:
             raise ValueError("Invalid job layer settings.")
-        margin = float(manifest.get("effective_raster_margin_mm",
-                                    info.get("margin_mm", 0.0)))
+        margin = float(manifest.get("effective_raster_margin_mm", info.get("margin_mm", 0)))
         bounds = manifest["model_bounds_mm"]
         self.min_x = float(bounds[0][0]) - margin
         self.max_y = float(bounds[1][1]) + margin
@@ -56,75 +89,187 @@ class PrintSimulation:
         self.min_y = self.max_y - self.depth
         if self.width <= 0 or self.depth <= 0:
             raise ValueError("Invalid job raster size.")
-        self.scan_pitch_mm = float(scan_pitch_mm)
+        self.head_spec = head_spec or PrintHeadSpec()
+        self.scan_pitch_mm = float(
+            scan_pitch_mm if scan_pitch_mm is not None else self.head_spec.swath_mm)
         self.head_clearance_mm = float(head_clearance_mm)
-        if self.scan_pitch_mm <= 0 or self.head_clearance_mm < 0:
+        self.overscan_mm = float(overscan_mm)
+        if (not math.isfinite(self.scan_pitch_mm) or self.scan_pitch_mm <= 0
+                or not math.isfinite(self.head_clearance_mm) or self.head_clearance_mm < 0
+                or not math.isfinite(self.overscan_mm) or self.overscan_mm < 0):
             raise ValueError("Invalid simulation geometry.")
         self.rows = max(1, math.ceil(self.depth / self.scan_pitch_mm))
         self.row_step = self.depth / self.rows
-        self.path_length_mm = self.rows * self.width + (self.rows - 1) * self.row_step
-        self.layer_change_seconds = 0.25  # visualization only
-        self.move_speed_mm_s = 100.0
-        self.set_move_speed(move_speed_mm_s)
+        self.passes = self._validate_passes(passes)
+        self.print_speed_mm_s = self._validate_speed(print_speed_mm_s)
+        self.move_speed_mm_s = self._validate_speed(move_speed_mm_s)
+        self.segments: list[MotionSegment] = []
+        self._segment_end_s: list[float] = []
+        self._layer_start_s: list[float] = []
+        self._layer_end_s: list[float] = []
+        self._layer_print_time_s: list[float] = []
+        self._build_path()
 
-    def set_move_speed(self, speed_mm_s: float) -> None:
-        if not math.isfinite(speed_mm_s) or not 1.0 <= speed_mm_s <= 500.0:
-            raise ValueError("Move speed must be between 1 and 500 mm/s.")
-        self.move_speed_mm_s = float(speed_mm_s)
+    @staticmethod
+    def _validate_speed(value: float) -> float:
+        if not math.isfinite(value) or not 1 <= value <= 3000:
+            raise ValueError("Printhead and movement speed must be 1–3000 mm/s.")
+        return float(value)
+
+    @staticmethod
+    def _validate_passes(value: int) -> int:
+        if isinstance(value, bool) or int(value) != value or not 1 <= int(value) <= 32:
+            raise ValueError("Passes per band must be 1–32.")
+        return int(value)
+
+    def set_print_speed(self, value: float):
+        self.print_speed_mm_s = self._validate_speed(value)
+        self._build_path()
+
+    def set_move_speed(self, value: float):
+        self.move_speed_mm_s = self._validate_speed(value)
+        self._build_path()
+
+    def set_passes(self, value: int):
+        self.passes = self._validate_passes(value)
+        self._build_path()
 
     @property
-    def layer_seconds(self) -> float:
-        return self.path_length_mm / self.move_speed_mm_s + self.layer_change_seconds
+    def layer_seconds(self):
+        return self._layer_end_s[0]
 
     @property
-    def total_seconds(self) -> float:
-        return self.count * self.layer_seconds
+    def total_seconds(self):
+        return self._segment_end_s[-1]
+
+    @property
+    def total_print_seconds(self):
+        return sum(self._layer_print_time_s)
+
+    @property
+    def total_movement_seconds(self):
+        return self.total_seconds - self.total_print_seconds
+
+    def _build_path(self):
+        self.segments = []
+        self._segment_end_s = []
+        self._layer_start_s = []
+        self._layer_end_s = []
+        self._layer_print_time_s = []
+        elapsed = 0.0
+        left = self.min_x - self.overscan_mm
+        right = self.min_x + self.width + self.overscan_mm
+        y_first = self.max_y - self.row_step * 0.5
+        last_xyz = (left, y_first,
+                    float(self.layers[0]["target_stack_height_mm"]) + self.head_clearance_mm)
+
+        def add(kind, layer, dest, band, pidx):
+            nonlocal elapsed, last_xyz
+            dist = math.dist(last_xyz, dest)
+            speed = self.print_speed_mm_s if kind == "print" else self.move_speed_mm_s
+            duration = dist / speed
+            # No zero-length return segment needed; every meaningful move has
+            # an explicit continuous start and end and positive duration.
+            if duration > 1e-12:
+                seg = MotionSegment(kind, layer, last_xyz, dest, speed,
+                                    duration, band, pidx, kind == "print")
+                self.segments.append(seg)
+                elapsed += duration
+                self._segment_end_s.append(elapsed)
+            last_xyz = dest
+
+        for layer in range(self.count):
+            self._layer_start_s.append(elapsed)
+            height = float(self.layers[layer]["target_stack_height_mm"])
+            z = height + self.head_clearance_mm
+            print_seconds = 0.0
+            for band in range(self.rows):
+                y = self.max_y - (band + .5) * self.row_step
+                for pass_index in range(self.passes):
+                    # Boustrophedon scan: never teleport at a pass boundary.
+                    target_x = right if pass_index % 2 == 0 else left
+                    start_x = left if pass_index % 2 == 0 else right
+                    if (abs(last_xyz[0] - start_x) > 1e-9
+                            or abs(last_xyz[1] - y) > 1e-9):
+                        add("stepover" if band else "travel", layer,
+                            (start_x, y, z), band, pass_index)
+                    before = elapsed
+                    add("print", layer, (target_x, y, z), band, pass_index)
+                    print_seconds += elapsed - before
+            self._layer_print_time_s.append(print_seconds)
+            # Explicit return at the non-printing movement speed, even for
+            # final layer. Next layer starts exactly at this return position.
+            add("return", layer, (left, y_first, z), self.rows - 1, self.passes - 1)
+            if layer + 1 < self.count:
+                next_z = (float(self.layers[layer + 1]["target_stack_height_mm"])
+                          + self.head_clearance_mm)
+                add("z_move", layer, (left, y_first, next_z),
+                    self.rows - 1, self.passes - 1)
+            self._layer_end_s.append(elapsed)
+        if not self.segments:
+            raise ValueError("Print path has no movement.")
 
     def get_frame(self, timeline_fraction: float) -> SimulationFrame:
         if not math.isfinite(timeline_fraction):
             raise ValueError("Timeline position must be finite.")
-        p = max(0.0, min(1.0, float(timeline_fraction)))
+        fraction = max(0.0, min(1.0, float(timeline_fraction)))
         total = self.total_seconds
-        elapsed = p * total
-        complete = p >= 1.0
-        # Timeline fractions like 2/5 can round a few ULPs below a layer
-        # boundary. Treat exact layer-step positions as the next layer.
-        layer = min(self.count - 1,
-                    int(math.floor(elapsed / self.layer_seconds + 1e-9)))
-        offset = self.layer_seconds if complete else elapsed - layer * self.layer_seconds
-        move_seconds = self.path_length_mm / self.move_speed_mm_s
-        distance = min(self.path_length_mm, max(0.0, offset * self.move_speed_mm_s))
-        progress = distance / self.path_length_mm
-        # Each raster row scans across X, then advances in Y at the row end.
-        block = self.width + self.row_step
-        row = min(self.rows - 1, int(distance / block))
-        within = max(0.0, distance - row * block)
-        across = min(1.0, within / self.width)
-        direction_right = (row % 2 == 0)
-        x = self.min_x + (across if direction_right else 1 - across) * self.width
-        if within > self.width and row < self.rows - 1:
-            y = self.max_y - (row + .5 + (within - self.width) / self.row_step) * self.row_step
-        else:
-            y = self.max_y - (row + .5) * self.row_step
+        t = fraction * total
+        complete = fraction >= 1.0
+        ix = min(len(self.segments) - 1,
+                 bisect_right(self._segment_end_s, t + 1e-9))
+        segment = self.segments[ix]
+        t_begin = self._segment_end_s[ix-1] if ix else 0.0
+        alpha = max(0.0, min(1.0,
+                            (t - t_begin) / segment.duration_s))
+        xyz = tuple(a + alpha * (b - a) for a, b in
+                    zip(segment.start_xyz, segment.end_xyz))
+        layer = segment.layer_index
+        start = self._layer_start_s[layer]
+        end = self._layer_end_s[layer]
+        layer_progress = max(0.0, min(1.0, (t-start) / max(1e-9, end-start)))
         height = float(self.layers[layer]["target_stack_height_mm"])
-        completed_height = (
-            height if complete else
-            (0.0 if layer == 0 else
-             float(self.layers[layer - 1]["target_stack_height_mm"])))
+        below = 0.0 if layer == 0 else float(
+            self.layers[layer-1]["target_stack_height_mm"])
+        if complete:
+            below = height
+            layer_progress = 1.0
+        direction_right = segment.end_xyz[0] >= segment.start_xyz[0]
+        if segment.printing:
+            print_fraction = (xyz[0] - segment.start_xyz[0]) / (
+                segment.end_xyz[0] - segment.start_xyz[0])
+            scan_fraction = (segment.pass_index + alpha) / self.passes
+        else:
+            print_fraction = 1.0 if direction_right else 0.0
+            # Show completed band after all printing passes, even during return.
+            scan_fraction = min(1.0, (segment.pass_index + 1) / self.passes)
         return SimulationFrame(
             layer_index=layer, layer_count=self.count,
-            layer_progress=progress, completed_height_mm=completed_height,
+            layer_progress=layer_progress,
+            completed_height_mm=below,
             current_top_mm=height,
-            head_position_mm=(float(x), float(y), height + self.head_clearance_mm),
-            row_index=row, row_fraction=across,
+            head_position_mm=xyz,
+            row_index=segment.band_index,
+            row_fraction=scan_fraction,
             rows_per_layer=self.rows,
-            elapsed_virtual_s=elapsed, total_virtual_s=total,
-            timeline_fraction=p, completed=complete,
+            elapsed_virtual_s=t,
+            total_virtual_s=total,
+            timeline_fraction=fraction,
+            completed=complete,
+            motion_kind=segment.kind,
+            printing=segment.printing,
+            progress_percent=100 * fraction,
+            elapsed_print_s=self.total_print_seconds * fraction,  # summary approximation
+            remaining_virtual_s=max(0.0, total-t),
+            pass_index=segment.pass_index,
         )
 
     def step_layer(self, timeline_fraction: float, amount: int) -> float:
         layer = self.get_frame(timeline_fraction).layer_index
-        return max(0.0, min(1.0, (layer + amount) / self.count))
+        target = min(self.count, max(0, layer+int(amount)))
+        if target == self.count:
+            return 1.0
+        return self._layer_start_s[target] / self.total_seconds
 
     def position_from_ticks(self, ticks: int) -> SimulationFrame:
         return self.get_frame(int(ticks) / TIMELINE_TICKS)
