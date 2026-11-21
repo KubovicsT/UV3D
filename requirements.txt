@@ -4,3 +4,4 @@ trimesh>=4.6,<5.0
 shapely>=2.0,<3.0
 Pillow>=11.0,<13.0
 lxml>=5.0,<7.0
+fast-simplification>=0.2.0,<0.3.0
