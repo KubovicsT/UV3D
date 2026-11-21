@@ -292,19 +292,19 @@ class MainWindow(QMainWindow):
         self.model_height.setValue(min(max(float(mesh.extents[2]), 0.05), 180.0))
         self.model_height.setEnabled(True)
         self.model_height.blockSignals(False)
-        self.on_height_changed()
+        self.on_height_changed(reset_camera=True, reset_layer=True)
         self.export_button.setEnabled(True)
         self.log.appendPlainText(f"Imported: {filename}")
         for warning in warnings:
             self.log.appendPlainText("WARNING: " + warning)
 
-    def on_height_changed(self, *_):
+    def on_height_changed(self, *_, reset_camera=False, reset_layer=False):
         if self.source_mesh is None:
             return
         target = self.model_height.value()
         try:
             self.preview_mesh = prepare_mesh(self.source_mesh, target)
-            self.viewport.set_mesh(self.preview_mesh, reset_camera=True)
+            self.viewport.set_mesh(self.preview_mesh, reset_camera=reset_camera)
         except Exception as exc:
             self.log.appendPlainText("Unable to resize mesh: " + str(exc))
             return
@@ -318,14 +318,14 @@ class MainWindow(QMainWindow):
             f"Uniform scale: {scale:.4f}×    Faces: {len(self.preview_mesh.faces):,}\n"
             f"Watertight: {self.preview_mesh.is_watertight}"
         )
-        self.refresh_layer_range()
+        self.refresh_layer_range(reset_index=reset_layer)
 
-    def refresh_layer_range(self, *_):
+    def refresh_layer_range(self, *_, reset_index=False):
         if self.preview_mesh is None:
             return
         n = max(1, math.ceil(float(self.preview_mesh.extents[2]) / self.layer.value()))
         self.layer_count.setText(f"{n:,}")
-        previous = self.layer_select.value()
+        previous = n if reset_index else self.layer_select.value()
         self.layer_select.blockSignals(True)
         self.slice_slider.blockSignals(True)
         self.layer_select.setRange(1, n)
