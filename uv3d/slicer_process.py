@@ -24,8 +24,6 @@ def report(kind: str, **kwargs) -> None:
 
 
 def run_request(request_path: str | Path) -> int:
-    from .core import SliceSettings, slice_model
-
     request_path = Path(request_path).resolve()
     request = json.loads(request_path.read_text(encoding="utf-8"))
     source = Path(request["source"])
@@ -41,6 +39,9 @@ def run_request(request_path: str | Path) -> int:
         logfile.write(f"Source: {source}\nOutput: {output}\n")
         start = time.perf_counter()
         last_logged = 0
+        # Import native dependencies after fault handler is active, so even
+        # startup faults have a diagnostic trace and an existing log file.
+        from .core import SliceSettings, slice_model, _slice_model_legacy
 
         def on_progress(current: int, total: int) -> None:
             nonlocal last_logged
@@ -54,7 +55,11 @@ def run_request(request_path: str | Path) -> int:
         try:
             options = SliceSettings(**request["settings"])
             report("stage", message="Loading source and preparing layers")
-            result = slice_model(source, output, options, on_progress=on_progress)
+            compatibility_mode = bool(request.get("compatibility_mode", False))
+            logfile.write("Mode: " + ("compatibility" if compatibility_mode else "accelerated") + "\n")
+            report("stage", message="Using " + ("compatibility" if compatibility_mode else "accelerated") + " slicing")
+            fn = _slice_model_legacy if compatibility_mode else slice_model
+            result = fn(source, output, options, on_progress=on_progress)
             if not result.exists():
                 raise RuntimeError("Slicer did not produce a job manifest")
             logfile.write("SUCCESS\n")
