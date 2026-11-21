@@ -17,6 +17,7 @@ from PySide6.QtGui import QSurfaceFormat
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL import GL
 from OpenGL.GL import shaders
+from .navigation import orbit as supp_orbit, zoom as supp_zoom, preset as camera_preset
 
 VERTEX_DTYPE = np.dtype([("position", "<f4", (3,)), ("color", "u1", (4,))])
 
@@ -70,6 +71,8 @@ void main() {
         outColor = vec4(0.43, 0.58, 0.74, 0.16);
     } else if (uMode == 3) {
         outColor = vec4(1.0, 0.67, 0.19, 1.0);
+    } else if (uMode == 4) {
+        outColor = vColor;
     } else {
         vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
         float light = 0.52 + 0.48 * abs(dot(N, normalize(vec3(0.3, 0.5, 0.8))));
@@ -143,8 +146,9 @@ class GpuModelViewport(QOpenGLWidget):
         self._line_data = None
         self._line_dirty = True
         self._line_count = 0
-        self.yaw = math.radians(37)
-        self.pitch = math.radians(27)
+        self._plate_dirty = True
+        self._plate_count = 0
+        self.yaw, self.pitch = camera_preset("Isometric")
         self.zoom = 1.0
         self.pan = np.zeros(2, dtype=float)
         self._last = self._drag = None
@@ -170,6 +174,7 @@ class GpuModelViewport(QOpenGLWidget):
         self._line_data = None
         self._line_dirty = True
         self.set_model_height(target_height_mm)
+        self._plate_dirty = True
         if reset_camera:
             self.reset_camera()
         self.update()
@@ -185,6 +190,7 @@ class GpuModelViewport(QOpenGLWidget):
         bounds[:, 2] -= self._base_min_z * scale
         self.mesh = SimpleNamespace(bounds=bounds, extents=bounds[1] - bounds[0])
         self._scale = scale
+        self._plate_dirty = True
         self._cap_revision += 1
         self._line_data = None
         self._line_dirty = True
@@ -194,7 +200,16 @@ class GpuModelViewport(QOpenGLWidget):
         self.update()
 
     def reset_camera(self):
-        self.yaw, self.pitch, self.zoom = math.radians(37), math.radians(27), 1.0
+        self.yaw, self.pitch = camera_preset("Isometric")
+        self.zoom = 1.0
+        self.pan[:] = 0
+        self.update()
+
+    def set_view_preset(self, name):
+        if name == "Fit model":
+            self.reset_camera()
+            return
+        self.yaw, self.pitch = camera_preset(name)
         self.pan[:] = 0
         self.update()
 
@@ -271,11 +286,12 @@ class GpuModelViewport(QOpenGLWidget):
             return
         delta = event.position() - self._last
         self._last = event.position()
-        if self._drag == Qt.LeftButton:
-            self.yaw += delta.x() * .01
-            self.pitch = float(np.clip(self.pitch + delta.y() * .007, -1.35, 1.35))
-        else:
+        if self._drag == Qt.RightButton:
+            self.yaw, self.pitch = supp_orbit(self.yaw, self.pitch, delta.x(), delta.y())
+        elif self._drag == Qt.MiddleButton:
             self.pan += np.array([delta.x(), delta.y()])
+        else:
+            return  # Left mouse remains available for selection and future gizmos.
         self.update()
         event.accept()
 
@@ -283,8 +299,7 @@ class GpuModelViewport(QOpenGLWidget):
         self._last = self._drag = None
 
     def wheelEvent(self, event):
-        self.zoom = float(np.clip(
-            self.zoom * 1.14 ** (event.angleDelta().y() / 120.), .1, 30.))
+        self.zoom = supp_zoom(self.zoom, event.angleDelta().y() / 120.)
         self.update()
         event.accept()
 
@@ -298,6 +313,8 @@ class GpuModelViewport(QOpenGLWidget):
             self._ebo = GL.glGenBuffers(1)
             self._line_vao = GL.glGenVertexArrays(1)
             self._line_vbo = GL.glGenBuffers(1)
+            self._plate_vao = GL.glGenVertexArrays(1)
+            self._plate_vbo = GL.glGenBuffers(1)
             self._gpu_ready = True
         except Exception as exc:
             self._gpu_ready = False
@@ -359,6 +376,60 @@ class GpuModelViewport(QOpenGLWidget):
         else:
             GL.glDrawArrays(GL.GL_TRIANGLES, 0, self._vertex_count)
 
+    def _draw_build_plate(self):
+        """Supp-style Z-up build grid and colored XYZ axes, independent of model detail."""
+        if self._plate_dirty:
+            bounds = np.asarray(self.mesh.bounds, dtype=float)
+            center = bounds.mean(axis=0)
+            span = max(10.0, float(max(self.mesh.extents[:2])) * 1.50)
+            # Local grid around imported object; avoids shrinking small models
+            # to invisibility on a complete 600x900 mm plate.
+            x0, x1 = center[0] - span / 2, center[0] + span / 2
+            y0, y1 = center[1] - span / 2, center[1] + span / 2
+            z = -.015 * span
+            points = []
+            def line(a, b, color):
+                points.extend([(a, color), (b, color)])
+            muted = [116, 122, 128, 255]
+            border = [179, 183, 187, 255]
+            for step in range(11):
+                t = step / 10
+                x = x0 + t * span
+                y = y0 + t * span
+                tone = border if step in (0, 10) else muted
+                line((x, y0, z), (x, y1, z), tone)
+                line((x0, y, z), (x1, y, z), tone)
+            origin = (x0 + .07 * span, y0 + .07 * span, z)
+            axis_length = .15 * span
+            line(origin, (origin[0] + axis_length, origin[1], z),
+                 [231, 106, 112, 255])
+            line(origin, (origin[0], origin[1] + axis_length, z),
+                 [89, 216, 154, 255])
+            line(origin, (origin[0], origin[1], z + axis_length),
+                 [110, 157, 251, 255])
+            packed = np.empty(len(points), dtype=VERTEX_DTYPE)
+            packed["position"] = [x[0] for x in points]
+            packed["color"] = [x[1] for x in points]
+            GL.glBindVertexArray(self._plate_vao)
+            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._plate_vbo)
+            GL.glBufferData(GL.GL_ARRAY_BUFFER, packed.nbytes,
+                            packed.tobytes(), GL.GL_STATIC_DRAW)
+            GL.glEnableVertexAttribArray(0)
+            GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE,
+                                     16, ctypes.c_void_p(0))
+            GL.glEnableVertexAttribArray(1)
+            GL.glVertexAttribPointer(1, 4, GL.GL_UNSIGNED_BYTE, GL.GL_TRUE,
+                                     16, ctypes.c_void_p(12))
+            self._plate_count = len(points)
+            self._plate_dirty = False
+        GL.glUniform1i(GL.glGetUniformLocation(self._program, "uMode"), 4)
+        self._set1f("uScale", 1.0)
+        self._set1f("uBaseZ", 0.0)
+        GL.glBindVertexArray(self._plate_vao)
+        GL.glDrawArrays(GL.GL_LINES, 0, self._plate_count)
+        self._set1f("uScale", self._scale)
+        self._set1f("uBaseZ", self._base_min_z)
+
     def _draw_cut_lines(self):
         if self._line_dirty:
             data = np.asarray(self._line_data, dtype=np.float32)
@@ -388,7 +459,7 @@ class GpuModelViewport(QOpenGLWidget):
         ratio = self.devicePixelRatioF()
         width, height = max(1, int(self.width()*ratio)), max(1, int(self.height()*ratio))
         GL.glViewport(0, 0, width, height)
-        GL.glClearColor(.075, .10, .15, 1.0)
+        GL.glClearColor(54 / 255, 57 / 255, 64 / 255, 1.0)
         GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
         if not self._gpu_ready or self.mesh is None:
             return
@@ -397,6 +468,7 @@ class GpuModelViewport(QOpenGLWidget):
         self._set_uniforms(width, height)
         GL.glEnable(GL.GL_DEPTH_TEST)
         GL.glDisable(GL.GL_CULL_FACE)
+        self._draw_build_plate()
         if self.slice_mode:
             GL.glEnable(GL.GL_BLEND)
             GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
