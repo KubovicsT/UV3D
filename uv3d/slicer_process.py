@@ -52,6 +52,19 @@ def run_request(request_path: str | Path) -> int:
                        elapsed_seconds=round(time.perf_counter() - start, 2))
                 logfile.write(f"layer {current}/{total}\n")
 
+        def on_plan(plan) -> None:
+            message = (
+                f"Preparing {plan.layers:,} layers at "
+                f"{plan.width_px:,} × {plan.height_px:,} px; "
+                f"{plan.png_files:,} output PNGs; "
+                f"{plan.total_layer_pixels:,} total layer-pixels. "
+                f"Raw channel data equivalent: "
+                f"{plan.raw_channels_bytes / (1024 ** 3):.2f} GiB "
+                f"(actual PNG sizes depend on compression)."
+            )
+            report("stage", message=message)
+            logfile.write(message + "\n")
+
         try:
             options = SliceSettings(**request["settings"])
             report("stage", message="Loading source and preparing layers")
@@ -59,7 +72,8 @@ def run_request(request_path: str | Path) -> int:
             logfile.write("Mode: " + ("compatibility" if compatibility_mode else "accelerated") + "\n")
             report("stage", message="Using " + ("compatibility" if compatibility_mode else "accelerated") + " slicing")
             fn = _slice_model_legacy if compatibility_mode else slice_model
-            result = fn(source, output, options, on_progress=on_progress)
+            result = fn(source, output, options, on_progress=on_progress,
+                        on_plan=on_plan)
             if not result.exists():
                 raise RuntimeError("Slicer did not produce a job manifest")
             logfile.write("SUCCESS\n")
