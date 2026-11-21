@@ -96,11 +96,13 @@ class GantrySetupWidget(QWidget):
             "on the left shines. Right-to-left printing uses the right-side "
             "trailing lamp. The leading lamp stays off. If that lamp covers "
             "the printed band, UV curing happens during the printing scan "
-            "without a separate sweep. The gantry extends its movement only "
-            "as far as needed to let the lamp cure the far edge. Otherwise "
-            "one dedicated UV sweep is used. Higher exposure counts add "
-            "extra sweeps. These timings and footprints are simulated, not "
-            "calibrated UV dose or machine control.")
+            "without a separate sweep. After ink deposition, it continues "
+            "until the lamp's BACK edge has completely cleared the model's "
+            "far edge, maintaining the same speed as the printing scan. "
+            "That gives each X position a full lamp-width exposure in the "
+            "motion model. A non-trailing lamp makes an entire footprint "
+            "sweep instead. Higher exposure counts add extra sweeps. "
+            "UV power, optical intensity and real dose are NOT calibrated.")
         explanation.setWordWrap(True)
         cure_layout.addRow(explanation)
         layout.addWidget(cure_box)
