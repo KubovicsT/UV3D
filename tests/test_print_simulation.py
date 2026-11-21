@@ -251,8 +251,11 @@ def test_simulation_opengl_error_is_caught_at_qt_paint_boundary():
 def test_every_layer_has_a_continuous_return_path_and_no_teleports(tmp_path):
     from uv3d.simulation_engine import PrintHeadSpec
     _, manifest = make_job(tmp_path / "head_job", layers=5)
+    # Odd pass count ends on the opposite side, requiring a visible return.
+    # Even passes on a one-band job already finish at the start: no movement
+    # is necessary there and the engine correctly omits zero-length returns.
     plan = PrintSimulation(manifest, move_speed_mm_s=600,
-                           print_speed_mm_s=300, passes=6,
+                           print_speed_mm_s=300, passes=5,
                            overscan_mm=10)
     head = PrintHeadSpec()
     assert (head.body_x_mm, head.body_y_mm, head.body_z_mm) == (69.1, 59.5, 35.6)
