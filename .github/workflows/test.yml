@@ -49,3 +49,26 @@ jobs:
           $env:QT_QPA_PLATFORM = 'offscreen'
           & .\\runtime\\python\\python.exe -c "from PySide6.QtWidgets import QApplication; from uv3d.app import MainWindow; a=QApplication([]); w=MainWindow(); assert w.windowTitle().startswith('UV3D'); w.close()"
           if ($LASTEXITCODE -ne 0) { throw 'Portable Python GUI smoke failed' }
+      - name: Smoke test isolated mask generation with portable Python (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $root = (Get-Location).Path
+          $python = Join-Path $root 'runtime\python\python.exe'
+          $source = Join-Path $root 'workspace\testcube.stl'
+          $output = Join-Path $root 'workspace\jobs\ci_isolated'
+          $logs = Join-Path $root 'workspace\logs'
+          $request = Join-Path $root 'workspace\ci_isolated.json'
+          & $python -c "import trimesh; trimesh.creation.box(extents=(2,2,1)).export(r'$source')"
+          if ($LASTEXITCODE -ne 0) { throw 'Failed creating test mesh' }
+          @{
+            source=$source
+            output=$output
+            log_dir=$logs
+            settings=@{layer_mm=0.5; dpi=72}
+          } | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 $request
+          & $python -m uv3d.slicer_process --request $request
+          if ($LASTEXITCODE -ne 0) { throw 'Portable isolated worker failed' }
+          if (-not (Test-Path (Join-Path $output 'job.json'))) {
+            throw 'Portable worker did not write job manifest'
+          }
