@@ -307,3 +307,26 @@ def test_i3200_visual_geometry_uses_full_actual_body_dimensions():
     assert spans[0] == pytest.approx(69.1, abs=.0001)
     assert spans[1] == pytest.approx(59.5, abs=.0001)
     assert spans[2] == pytest.approx(35.6, abs=.0001)
+
+
+
+def test_support_surface_includes_short_features_between_preview_sample_levels(tmp_path):
+    """Regression: 3D support preview used to skip 11/12 physical masks.
+
+    A protrusion that exists only at an intermediate layer must still be
+    represented after Z reduction, with no change to its source PNG.
+    """
+    job, manifest = make_job(tmp_path/"small_feature", layers=8)
+    for index, layer in enumerate(manifest["layers"]):
+        support = np.zeros((20, 50), np.uint8)
+        if index == 1:
+            support[3:13, 34:46] = 255
+        ok, png = cv2.imencode(".png", support)
+        assert ok
+        (job.parent / layer["support"]).write_bytes(png.tobytes())
+    result = build_support_surface(job, max_xy=48, max_levels=2)
+    assert result.sampled_levels == 2
+    assert len(result.triangles) > 0
+    # The only nonempty source support layer is within a Z bin, NOT at
+    # either sampled bin endpoint. A single-slice preview would miss it.
+    assert result.triangles[:, 0].max() > 3.1
