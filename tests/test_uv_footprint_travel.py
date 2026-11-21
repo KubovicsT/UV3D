@@ -2,8 +2,7 @@
 import pytest
 
 from uv3d.gantry import GantryConfig, HeadConfig, LampConfig
-from uv3d.simulation_engine import (
-    PrintSimulation, UV_STATIONARY_CURE_SECONDS)
+from uv3d.simulation_engine import PrintSimulation
 from uv3d.simulation_viewport import uv_footprints
 
 
@@ -28,12 +27,13 @@ def midpoint(plan, index):
 
 @pytest.mark.parametrize("print_mode", ["bidirectional", "unidirectional"])
 @pytest.mark.parametrize("passes", [1, 2, 3])
-def test_oversized_aligned_uv_lamp_cures_in_place_without_side_travel(
+def test_oversized_aligned_uv_lamp_fully_sweeps_every_printed_pixel(
         print_mode, passes):
-    """An oversized lamp already covers the raster at the print endpoint.
+    """Even a very wide lamp must traverse its COMPLETE illuminated width.
 
-    UV must turn on and briefly dwell THERE: no needless carriage trip
-    to the side, no head teleport, and no rescan of full raster.
+    A stationary UV pause gives nonuniform exposure compared with a
+    continuously moving lamp. Verify every layer gets a full footprint
+    sweep with uninterrupted carriage motion and correct duration.
     """
     config=GantryConfig(
         heads=[HeadConfig("white", "white", swath_mm=33.8)],
@@ -49,11 +49,13 @@ def test_oversized_aligned_uv_lamp_cures_in_place_without_side_travel(
             if s.kind=="cure":
                 previous=filtered[idx-1][1]
                 assert previous.kind=="print"
-                assert s.start_xyz == pytest.approx(previous.end_xyz)
-                assert s.end_xyz == pytest.approx(previous.end_xyz)
+                # The full 100-mm lamp footprint must pass from just
+                # outside X=0 to just outside X=20: 120 mm of travel.
+                assert abs(s.end_xyz[0]-s.start_xyz[0]) == pytest.approx(120)
+                assert s.speed_mm_s == plan.move_speed_mm_s
                 assert s.duration_s == pytest.approx(
-                    UV_STATIONARY_CURE_SECONDS)
-                assert s.speed_mm_s == 0
+                    120 / plan.move_speed_mm_s)
+                assert {s.start_xyz[0],s.end_xyz[0]} == {-50, 70}
                 frame=midpoint(plan,i)
                 assert frame.curing and not frame.printing
                 assert frame.head_position_mm == pytest.approx(s.start_xyz)
@@ -78,8 +80,10 @@ def test_oversized_lamp_repositions_only_if_its_actual_offset_requires_it():
     assert cure.kind=="cure"
     assert travel.start_xyz==pytest.approx(segments[first_print].end_xyz)
     assert travel.end_xyz==pytest.approx(cure.start_xyz)
-    assert cure.start_xyz==pytest.approx(cure.end_xyz)
-    # Position chosen is the nearest feasible location that covers raster.
+    # Center of lamp travels the raster width PLUS the lamp width,
+    # regardless of its mounting offset, to fully traverse the print.
+    assert abs(cure.end_xyz[0]-cure.start_xyz[0])==pytest.approx(120)
+    assert {cure.start_xyz[0],cure.end_xyz[0]}=={-250,-130}
     frame=midpoint(plan,first_print+2)
     lit=uv_footprints(frame,config,0,0,20,30)
     assert lit and lit[0][1:] == pytest.approx((0,0,20,30))
@@ -92,11 +96,11 @@ def test_narrow_lamp_only_sweeps_needed_distance_without_overscan():
     plan=PrintSimulation(job(),passes=2,gantry_config=config)
     cures=[s for s in plan.segments if s.kind=="cure"]
     assert len(cures)==2*plan.count
-    # 20-mm printed width with a 10-mm-wide UV footprint only needs
-    # 10 mm of lamp center travel, not 20 mm plus head overscan.
-    assert all(abs(s.end_xyz[0]-s.start_xyz[0])==pytest.approx(10)
+    # A 10-mm UV lamp on a 20-mm printed raster needs a 30-mm sweep:
+    # lead edge starts at X=0 and trail edge clears X=20.
+    assert all(abs(s.end_xyz[0]-s.start_xyz[0])==pytest.approx(30)
                for s in cures)
-    assert all({s.start_xyz[0],s.end_xyz[0]}=={5.0,15.0}
+    assert all({s.start_xyz[0],s.end_xyz[0]}=={-5.0,25.0}
                for s in cures)
 
 
