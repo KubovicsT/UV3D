@@ -7,10 +7,11 @@ UV3D targets the Gongzheng H6090EI (three Epson i3200 heads, CMYK/white/varnish)
 ## Features
 
 - Windows desktop GUI to import STL, OBJ, GLB, GLTF, 3MF and PLY triangle meshes.
+- **Responsive background imports:** load meshes and simplify preview geometry without blocking the Windows UI. A status message and indeterminate progress bar show which stage is running, and the log records timings.
 - Interactive orbitable **3D build viewport**: left-drag orbit, right/middle-drag pan, wheel zoom, Reset view.
 - **Set model height in millimeters**: the mesh is scaled uniformly in X/Y/Z and the exact same transformed geometry is used for both preview and exported slices.
 - Slicer-style **vertical layer slider**, synchronized numeric layer selector, translucent full-model silhouette, visible solid portion below the slice and amber highlighted cross-section **before export**.
-- The 3D view uses Qt software painting (no extra 3D graphics libraries or separate drivers). To stay responsive, it samples high-triangle-count meshes for surface rendering; the cross-section and exported masks use the complete geometry.
+- The 3D view uses Qt software painting (no extra 3D graphics libraries or separate drivers). To stay responsive, it builds a bounded triangle-count preview using vertex clustering in a background thread, while the cross-section and exported masks use the complete geometry. Cross-section calculations also run in the background and debounce rapid slider movements.
 - Generate same-size white, varnish and approximate colored boundary PNG masks for each horizontal slice, plus a JSON job manifest.
 - Support hollow regions, warn about open geometry and reject oversized jobs.
 - Preview exported 2D masks by channel, inspect layers inside the 3D view and simulate job progress with **no printer commands**.
@@ -71,11 +72,15 @@ The production app doesn't rely on system Python. MIT licensed: see LICENSE.
 
 - Non-manifold/open meshes may produce incomplete polygons.
 - The viewport is an approximate software-rendered 3D preview; complex meshes can render more slowly, and displayed exterior faces are sampled for performance. Exported slices are calculated from full-resolution geometry.
-- Height resizing is **uniform** rather than Z-only stretching; X and Y dimensions change proportionally. Existing job previews are invalidated when height or slice settings change.
+- Height resizing is **uniform** rather than Z-only stretching; X and Y dimensions change proportionally. Changing model height now reuses the original preview mesh instead of reprocessing the entire file. Existing job previews are invalidated when height or slice settings change.
 - Textured mesh colors are not reproduced accurately. Surface colors are only approximated along visible layer boundaries.
 - White/varnish masks need verified mapping to real RIP spot channels.
 - Registration in actual printer coordinates, ink deposition, mechanical Z positioning, cured thickness, software travel limits, and collision protection need validation.
 - Nominal media thickness is not a verified free-standing 3D build volume.
+
+## Diagnosing slow imports
+
+Open a model, then check the import messages in the slicer log. It records **geometry load seconds** and **preview preparation seconds** separately so you can see which stage needs additional optimization. Large files may still take time to process, but the interface should remain responsive. Only one import/export task runs at a time; the program intentionally prevents shutdown while the worker is active.
 
 ## Next milestones
 
