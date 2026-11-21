@@ -83,8 +83,10 @@ void main() {
     } else if (support > 0.03) {
         float coverage = printedCoverage(uSupportProgress, uSupportRowShift);
         if (coverage <= 0.0001) discard;
+        // Keep the actively printed support visible even when the completed
+        // support volume is made almost transparent to inspect the model.
         outColor = vec4(uCurrentSupportTint,
-                        coverage * support * uSupportTint.a);
+                        coverage * support * (0.35 + 0.65*uSupportTint.a));
     } else {
         discard;
     }
