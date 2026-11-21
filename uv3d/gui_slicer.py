@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import QObject, QProcess, QTimer, Signal
+from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
 
 from .core import SliceSettings
 
@@ -62,6 +62,14 @@ class SlicerController(QObject):
         process = QProcess(self)
         self.process = process
         process.setWorkingDirectory(str(self.root))
+        # Embedded Python uses its local ._pth; system Python used by CI/dev
+        # needs a known source root so the isolated worker can import UV3D.
+        env = QProcessEnvironment.systemEnvironment()
+        source_root = str(Path(__file__).resolve().parent.parent)
+        existing = env.value("PYTHONPATH", "")
+        import os
+        env.insert("PYTHONPATH", source_root + (os.pathsep + existing if existing else ""))
+        process.setProcessEnvironment(env)
         process.setProcessChannelMode(QProcess.SeparateChannels)
         process.readyReadStandardOutput.connect(self._stdout_ready)
         process.readyReadStandardError.connect(self._stderr_ready)
