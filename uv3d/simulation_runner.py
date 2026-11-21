@@ -57,10 +57,32 @@ def main(argv=None):
     _LOG_HANDLE.write(f"Job: {opts.job}\nGPU mode: {not opts.no_gpu}\n")
     _LOG_HANDLE.flush()
 
-    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtCore import Qt, QTimer, qInstallMessageHandler
     from PySide6.QtWidgets import QApplication
     from .simulation_widget import SimulationWidget
 
+    # Qt warnings (especially QBasicTimer cross-thread and QObject ownership
+    # diagnostics) are native-side signals: they otherwise disappear when the
+    # child exits before Python's exception hook can run. Keep this callback
+    # strongly referenced for the entire lifetime of the process.
+    import threading
+    def qt_message_handler(kind, context, message):
+        location = (f"{context.file}:{context.line}" if context.file else "Qt")
+        line = (f"{datetime.now().isoformat(timespec='milliseconds')} "
+                f"[thread={threading.get_ident()}] {location} "
+                f"Qt({int(kind)}): {message}\\n")
+        try:
+            _LOG_HANDLE.write(line)
+            _LOG_HANDLE.flush()
+        except Exception:
+            pass
+        try:
+            sys.stderr.write(line)
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+    previous_handler = qInstallMessageHandler(qt_message_handler)
     app = QApplication(sys.argv[:1])
     app.setStyle("Fusion")
     widget = SimulationWidget(root, gpu_enabled=not opts.no_gpu)
