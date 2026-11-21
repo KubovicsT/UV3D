@@ -68,7 +68,10 @@ class ImportWorker(QObject):
             begin = time.perf_counter()
             mesh, warnings = load_mesh(self.filename)
             read_seconds = time.perf_counter() - begin
-            self.stage.emit(f"Preparing interactive preview ({len(mesh.faces):,} triangles)...")
+            if getattr(ModelViewport, "FULL_RESOLUTION", False):
+                self.stage.emit(f"Preparing full-resolution GPU model ({len(mesh.faces):,} triangles)...")
+            else:
+                self.stage.emit(f"Preparing software preview ({len(mesh.faces):,} source triangles)...")
             begin = time.perf_counter()
             if getattr(ModelViewport, "FULL_RESOLUTION", False):
                 preview = prepare_gpu_geometry(mesh)  # Original vertices/faces, no simplification.
@@ -199,7 +202,11 @@ class MainWindow(QMainWindow):
         right = QWidget()
         right_layout = QVBoxLayout(right)
         top = QHBoxLayout()
-        title = QLabel("3D build preview")
+        title = QLabel(
+            "3D build preview — full original resolution (GPU)"
+            if getattr(ModelViewport, "FULL_RESOLUTION", False)
+            else "3D build preview — software fallback"
+        )
         title.setStyleSheet("font-size: 15px; font-weight: 600;")
         top.addWidget(title)
         top.addStretch(1)
