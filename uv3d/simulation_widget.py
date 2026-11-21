@@ -584,13 +584,13 @@ class SimulationWidget(QWidget):
             f"{frame.motion_kind.upper()} · "
             f"{frame.layer_progress*100:.1f}% through layer. "
             f"Head X {hx:.1f}, Y {hy:.1f}, Z {hz:.2f} mm · "
-            f"{frame.rows_per_layer} print bands × {self.plan.passes} passes "
+            f"Band {frame.row_index+1}/{frame.rows_per_layer}, "
+            f"pass {frame.pass_index+1}/{self.plan.passes} "
             f"({self.print_mode.currentText().split(' — ')[0]}). "
             f"Carriage: {sum(h.enabled for h in self._gantry_config.heads)} heads, "
             f"{sum(l.enabled for l in self._gantry_config.lamps)} UV lamps. "
-            f"{'UV curing' if frame.curing else 'Deposition/travel'}; "
-            f"Based on one i3200-U1 (69.1 × 59.5 × 35.6 mm); "
-            "3-head arrangement, real acceleration/UV curing not calibrated.")
+            f"{'Curing immediately after this pass' if frame.curing else 'Deposition/travel'}; "
+            "UV footprint and time are simulation estimates, not calibrated.")
         if update_viewport and self.viewport is not None and self._scene_ready:
             self.viewport.set_frame(frame)
             if frame.layer_index != self._wanted_texture_layer:
