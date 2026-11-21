@@ -112,6 +112,14 @@ The exported masks now have an explicit regression test with a wide roof on a na
 
 Open a model, then check the import messages in the slicer log. It records **geometry load seconds** and **preview preparation seconds** separately so you can see which stage needs additional optimization. Large files may still take time to read or upload to GPU memory, but the import worker keeps most of the processing off the UI thread. Only one import/export task runs at a time; the program intentionally prevents shutdown while the worker is active.
 
+## Simulation timeline stability
+
+Seeking across many exported layers no longer starts a PNG read for every intermediate layer. The current printhead position and layer number update while dragging, with 3D redraws limited to approximately 30 per second; only after the slider is released does UV3D decode and upload the final selected layer's mask textures. Texture loading remains off the UI thread.
+
+PyOpenGL exceptions inside the 3D simulation paint callback are caught before they reach Qt's native paint machinery. The simulation pauses and writes a persistent traceback to `workspace/logs/uv3d-simulation.log` (best effort). If Windows terminates the process at the graphics-driver/native level, inspect `workspace/logs/uv3d-gui-crash.log` as well; a driver crash may not yield a Python traceback.
+
+CI now tests **1,000 timeline movements across 200 layers**, exact boundary seeks, plus **180 real OpenGL software-rendered seek frames** under Xvfb/Mesa. This tests correctness and GL state handling; actual driver behavior still depends on the installed GPU driver.
+
 ## Print queue — interactive 3D simulation
 
 After generating masks, open the **Print queue — simulation** tab. UV3D loads the new `job.json` automatically. You can also click **Open existing job.json** to revisit a completed job under `workspace/jobs`. The original mesh is loaded from the locally saved job source path (or original task record); keep that source file available. Print simulation never contacts the machine.
