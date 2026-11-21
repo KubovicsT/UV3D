@@ -101,7 +101,10 @@ def test_distant_trailing_lamp_only_extends_curing_to_far_raster_edge():
         assert follow.start_xyz==pytest.approx(printing.end_xyz)
         assert follow.duration_s>0
         assert follow.speed_mm_s==plan.move_speed_mm_s
-        final=midpoint(plan,i+1)
+        # Check near the END of the follow-through: until the lamp reaches
+        # the raster, the early part of a distant trailing move may be dark.
+        t=plan._segment_end_s[i+1]-min(1e-7,follow.duration_s*.001)
+        final=plan.get_frame(t/plan.total_seconds)
         assert len(uv_footprints(final,cfg,0,0,20,30))==1
     assert all(a.end_xyz==pytest.approx(b.start_xyz)
                for a,b in zip(plan.segments,plan.segments[1:]))
