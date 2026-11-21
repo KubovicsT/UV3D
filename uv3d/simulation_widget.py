@@ -319,7 +319,23 @@ class SimulationWidget(QWidget):
                 or self._texture_thread is not None)
 
     def _display_gl_error(self, problem):
-        self.detail.setText("GPU simulation renderer unavailable: " + problem)
+        # Qt/OpenGL failures can occur only after the first timeline seek.
+        # Keep a persistent traceback rather than silently losing the reason.
+        try:
+            directory = self.root / "workspace" / "logs"
+            directory.mkdir(parents=True, exist_ok=True)
+            from datetime import datetime
+            with (directory / "uv3d-simulation.log").open(
+                    "a", encoding="utf-8") as stream:
+                stream.write(f"\n=== {datetime.now().isoformat()} ===\n"
+                             f"Timeline {self.timeline.value()}, "
+                             f"Layer {self._wanted_texture_layer+1}:\n{problem}\n")
+        except Exception:
+            pass
+        self.pause()
+        self.detail.setText(
+            "Simulation renderer error (the app remains open). "
+            "See workspace/logs/uv3d-simulation.log — " + problem.splitlines()[0])
 
     def open_job(self):
         filename, _ = QFileDialog.getOpenFileName(
