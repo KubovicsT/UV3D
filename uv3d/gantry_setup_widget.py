@@ -90,15 +90,17 @@ class GantrySetupWidget(QWidget):
         self.cure_passes = QSpinBox()
         self.cure_passes.setRange(1, 5)
         self.cure_passes.valueChanged.connect(self._commit)
-        cure_layout.addRow("UV sweeps per lamp after EACH print pass", self.cure_passes)
+        cure_layout.addRow("UV exposures per print pass", self.cure_passes)
         explanation = QLabel(
-            "UV exposure is interleaved with printing: print pass 1, cure "
-            "the just-printed band, print pass 2, cure that band again, etc. "
-            "Each enabled lamp moves across the printed strip after EVERY "
-            "print pass, with extra tracks only if its footprint is narrower "
-            "than that strip. UV-only moves use Movement speed and count "
-            "toward the estimated time. These are illustrative motion and "
-            "light-footprint calculations, not calibrated UV dose or printer commands.")
+            "During left-to-right printing, only the lamp BEHIND the heads "
+            "on the left shines. Right-to-left printing uses the right-side "
+            "trailing lamp. The leading lamp stays off. If that lamp covers "
+            "the printed band, UV curing happens during the printing scan "
+            "without a separate sweep. The gantry extends its movement only "
+            "as far as needed to let the lamp cure the far edge. Otherwise "
+            "one dedicated UV sweep is used. Higher exposure counts add "
+            "extra sweeps. These timings and footprints are simulated, not "
+            "calibrated UV dose or machine control.")
         explanation.setWordWrap(True)
         cure_layout.addRow(explanation)
         layout.addWidget(cure_box)
