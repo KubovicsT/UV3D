@@ -324,7 +324,7 @@ class SimulationViewport(GpuModelViewport):
         self._set1f("uScale", self._scale)
         self._set1f("uBaseZ", self._base_min_z)
 
-    def paintGL(self):
+    def _paint_simulation_frame(self):
         ratio = self.devicePixelRatioF()
         w, h = max(1,int(self.width()*ratio)),max(1,int(self.height()*ratio))
         GL.glViewport(0,0,w,h)
@@ -355,3 +355,27 @@ class SimulationViewport(GpuModelViewport):
             self._draw_head()
         GL.glBindVertexArray(0)
         GL.glUseProgram(0)
+
+    def paintGL(self):
+        """An OpenGL driver error must not propagate from Qt's paint callback.
+
+        PyOpenGL exceptions raised here previously reached Qt's native paint
+        machinery, which can terminate the whole application on Windows.
+        Disable only this simulation viewport and preserve the application.
+        """
+        if getattr(self, "_gl_render_failed", False):
+            return
+        try:
+            self._paint_simulation_frame()
+        except Exception as exc:
+            import traceback
+            if not getattr(self, "_gl_render_failed", False):
+                self._gl_render_failed = True
+                self._gpu_ready = False
+                try:
+                    self.opengl_failed.emit(
+                        f"{type(exc).__name__}: {exc}\\n"
+                        f"{traceback.format_exc()}")
+                except Exception:
+                    pass
+            # Avoid further GL calls in a potentially invalid native context.
