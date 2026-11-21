@@ -180,3 +180,21 @@ def test_editing_gantry_in_simulator_updates_eta_without_reexport(tmp_path, exam
     assert sim.plan.total_seconds > base
     assert "UV lamps" in sim.detail.text()
     sim.close()
+
+
+
+def test_editable_head_swath_changes_number_of_printing_bands_and_eta(example_job):
+    wide = GantryConfig(
+        heads=[HeadConfig("White", "white", swath_mm=33.8)], lamps=[])
+    narrow = GantryConfig(
+        heads=[HeadConfig("White", "white", swath_mm=6.0)], lamps=[])
+    plan = PrintSimulation(example_job, gantry_config=wide)
+    wide_rows = plan.rows
+    duration = plan.total_seconds
+    plan.set_gantry_config(narrow)
+    assert plan.rows > wide_rows
+    assert plan.total_seconds > duration
+    # Explicit scan-pitch overrides are honored in controlled test cases.
+    controlled = PrintSimulation(
+        example_job, gantry_config=narrow, scan_pitch_mm=15)
+    assert controlled.rows == 2
