@@ -19,7 +19,16 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 from .core import MachineProfile, SliceSettings, load_mesh, prepare_mesh, slice_model
-from .viewport import ModelViewport, build_preview_geometry
+from .viewport import ModelViewport as SoftwareModelViewport, build_preview_geometry
+
+# Interactive Windows sessions render the ORIGINAL mesh on the GPU.
+# Headless CI and environments without an OpenGL display use the existing
+# software viewport, which deliberately remains a low-detail fallback.
+if sys.platform == "win32" and os.environ.get("QT_QPA_PLATFORM", "").lower() not in ("offscreen", "minimal"):
+    from .gpu_viewport import GpuModelViewport as ModelViewport, prepare_gpu_geometry
+else:
+    ModelViewport = SoftwareModelViewport
+    prepare_gpu_geometry = None
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE = ROOT / "workspace"
@@ -61,8 +70,11 @@ class ImportWorker(QObject):
             read_seconds = time.perf_counter() - begin
             self.stage.emit(f"Preparing interactive preview ({len(mesh.faces):,} triangles)...")
             begin = time.perf_counter()
-            preview = build_preview_geometry(
-                mesh, max_faces=ModelViewport.PREVIEW_TRIANGLES)
+            if getattr(ModelViewport, "FULL_RESOLUTION", False):
+                preview = prepare_gpu_geometry(mesh)  # Original vertices/faces, no simplification.
+            else:
+                preview = build_preview_geometry(
+                    mesh, max_faces=ModelViewport.PREVIEW_TRIANGLES)
             preview_seconds = time.perf_counter() - begin
             self.finished.emit(self.filename, mesh, preview, warnings,
                                (read_seconds, preview_seconds))
@@ -202,6 +214,8 @@ class MainWindow(QMainWindow):
 
         view_row = QHBoxLayout()
         self.viewport = ModelViewport()
+        if hasattr(self.viewport, "opengl_failed"):
+            self.viewport.opengl_failed.connect(self.report_opengl_failure)
         view_row.addWidget(self.viewport, stretch=1)
         slider_box = QVBoxLayout()
         top_label = QLabel("Top")
@@ -249,6 +263,14 @@ class MainWindow(QMainWindow):
         split.addWidget(right)
         split.setSizes([370, 960])
         return panel
+
+    def report_opengl_failure(self, problem: str):
+        self.log.appendPlainText("OpenGL viewer initialization failed: " + problem)
+        self.statusBar().showMessage("GPU viewer unavailable: check OpenGL drivers")
+        QMessageBox.warning(
+            self, "GPU viewer unavailable",
+            "UV3D could not start OpenGL 3.3. Update your graphics driver or "
+            "run the software fallback.\n\n" + problem)
 
     def reset_view(self):
         self.viewport.reset_camera()
