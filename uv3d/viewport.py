@@ -33,6 +33,70 @@ def clip_triangle_below(triangle: np.ndarray, z: float) -> np.ndarray:
     return np.asarray(result, dtype=float)
 
 
+def build_preview_geometry(mesh: trimesh.Trimesh, max_faces: int = 7000):
+    """Return connected low-detail surface triangles, normals and source colors.
+
+    Quantized-vertex clustering keeps neighboring faces joined. This is
+    deliberately preview-only: full geometry is used for cross sections/export.
+    """
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    colors = _face_colors(mesh)
+    if len(faces) <= max_faces:
+        return vertices[faces], np.asarray(mesh.face_normals), colors
+
+    extent = float(np.max(mesh.extents))
+    bounds_min = mesh.bounds[0]
+
+    def cluster(cell_size):
+        cells = np.floor((vertices - bounds_min) / cell_size).astype(np.int64)
+        _, inverse = np.unique(cells, axis=0, return_inverse=True)
+        centers = np.zeros((int(inverse.max()) + 1, 3), dtype=np.float64)
+        np.add.at(centers, inverse, vertices)
+        centers /= np.maximum(1, np.bincount(inverse))[:, None]
+        new_faces = inverse[faces]
+        keep = ((new_faces[:, 0] != new_faces[:, 1])
+                & (new_faces[:, 0] != new_faces[:, 2])
+                & (new_faces[:, 1] != new_faces[:, 2]))
+        kept = np.flatnonzero(keep)
+        if not len(kept):
+            return None
+        # Remove duplicate geometric triangles while retaining the corresponding
+        # source face ID (to keep colors mapped to the right part of the model).
+        _, ids = np.unique(np.sort(new_faces[kept], axis=1), axis=0,
+                           return_index=True)
+        selected = kept[ids]
+        return centers[new_faces[selected]], colors[selected]
+
+    lo = max(extent / 2500, 1e-8)
+    hi = max(extent / 3, 1e-7)
+    best = None
+    # More cells = more detail. Find the highest usable triangle count.
+    for _ in range(8):
+        step = math.sqrt(lo * hi)
+        candidate = cluster(step)
+        count = len(candidate[0]) if candidate else 0
+        if count > max_faces:
+            lo = step
+        else:
+            hi = step
+            if candidate and (best is None or count > len(best[0])):
+                best = candidate
+        if best is not None and len(best[0]) >= 0.91 * max_faces:
+            break
+    if best is None:
+        # This is an emergency fallback only, never used for typical closed meshes.
+        ids = np.linspace(0, len(faces) - 1, max_faces, dtype=np.int64)
+        return vertices[faces[ids]], np.asarray(mesh.face_normals)[ids], colors[ids]
+
+    triangles, rgb = best
+    cross = np.cross(triangles[:, 1] - triangles[:, 0],
+                     triangles[:, 2] - triangles[:, 0])
+    norms = np.linalg.norm(cross, axis=1)
+    cross /= np.maximum(norms[:, None], 1e-12)
+    return triangles, cross, rgb
+
+
 class ModelViewport(QWidget):
     """Orbits with left drag, pans with right drag and zooms with wheel."""
 
@@ -69,13 +133,8 @@ class ModelViewport(QWidget):
             self.triangles = self.normals = self.face_colors = None
             self.update()
             return
-        count = len(mesh.faces)
-        # Preview geometry is deliberately bounded. Full-resolution geometry
-        # still goes through slice_model and the exact cross-section routine.
-        ids = np.unique(np.linspace(0, count - 1, min(count, self.PREVIEW_TRIANGLES), dtype=np.int64))
-        self.triangles = np.asarray(mesh.vertices[mesh.faces[ids]], dtype=float)
-        self.normals = np.asarray(mesh.face_normals[ids], dtype=float)
-        self.face_colors = np.asarray(_face_colors(mesh)[ids], dtype=np.uint8)
+        self.triangles, self.normals, self.face_colors = build_preview_geometry(
+            mesh, max_faces=self.PREVIEW_TRIANGLES)
         if reset_camera:
             self.reset_camera()
         else:
