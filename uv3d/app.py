@@ -232,6 +232,18 @@ class MainWindow(QMainWindow):
         view_row.addLayout(slider_box)
         right_layout.addLayout(view_row, stretch=6)
 
+        camera_buttons = QHBoxLayout()
+        for name in ('Isometric', 'Top', 'Front', 'Right', 'Fit model'):
+            button = QPushButton(name)
+            button.clicked.connect(lambda checked=False, view=name:
+                                   self.viewport.set_view_preset(view))
+            camera_buttons.addWidget(button)
+        camera_buttons.addStretch(1)
+        right_layout.addLayout(camera_buttons)
+        controls_hint = QLabel('RMB orbit   ·   MMB pan   ·   Wheel zoom   ·   LMB selection')
+        controls_hint.setStyleSheet('color: #aeb9c6;')
+        right_layout.addWidget(controls_hint)
+
         layer_nav = QHBoxLayout()
         self.layer_select = QSpinBox()
         self.layer_select.setRange(1, 1)
@@ -530,6 +542,7 @@ class MainWindow(QMainWindow):
         self.show_slice()
         self.output_label.setText(f"{n:,} scaled layers exported to:\n{self.job_path.parent}")
         self.log.appendPlainText(f"Exported {n} OFFLINE layers, scaled height {self.job_data['scaled_dimensions_mm'][2]:.3f} mm.")
+        self.statusBar().showMessage("Offline layer masks generated successfully")
         for warning in self.job_data["warnings"]:
             self.log.appendPlainText("WARNING: " + warning)
         self.sim_detail.setText(f"Loaded offline job: {n} layers")
