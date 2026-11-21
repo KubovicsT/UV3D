@@ -1,6 +1,6 @@
 # UV3D
 
-**Prototype v0.4 — offline experimental UV slicing. No printhead, motor, UV lamp, or printer control is implemented.**
+**Prototype v0.5 — offline experimental UV slicing. No printhead, motor, UV lamp, or printer control is implemented.**
 
 UV3D targets the Gongzheng H6090EI (three Epson i3200 heads, CMYK/white/varnish), with FlexiPRINT MiniTX GongZheng Edition and Gongzheng PrintExp. It is independent of both vendor applications.
 
@@ -17,6 +17,10 @@ UV3D targets the Gongzheng H6090EI (three Epson i3200 heads, CMYK/white/varnish)
 - Exported slices always use the complete original mesh geometry, regardless of viewer.
 - **Crash-resistant layer generation:** masks are generated in a **separate Python process**, so a native OpenCV/geometry failure can terminate the worker without closing UV3D. The main window shows progress, a Cancel button and an error dialog with a log path. Every job gets a diagnostic log under `workspace/logs`; incomplete output remains separated under `workspace/jobs`.
 - **Compatibility slicing:** optional checkbox switches to the older, slower PIL/GEOS workflow if a particular model fails in the accelerated worker.
+- **Solid volume model masks:** all pixels inside each printable cross-section are filled with the selected body material (white or varnish proposal), rather than outputting only a thin outer color contour. Intentional geometric voids and through-holes are preserved according to the mesh.
+- **Conformal sacrificial support (experimental):** additional separate `_support.png` grayscale masks for each layer. Supports follow the model with an adjustable **0–5 mm casing** and extend vertically all the way to the build plate beneath every higher occupied pixel. The algorithm uses a cumulative top-down XY envelope rather than a full rectangular cube. Both accelerated and compatibility slicing modes support this.
+- **Support preview:** choose `combined` to see solid part (white), approximate surface color and purple support together, or `support` to view the proposed sacrificial material alone. The Windows GPU view also shows a *sampled 3D purple wireframe* after export, with a visibility checkbox. Only the wireframe is sampled: all mask PNGs remain full resolution.
+- **Volume comparison:** the job manifest records estimated solid/support volume and support savings against a solid rectangular enclosure around the footprint. These are raster-based geometric estimates, not measured ink requirements.
 - **Faster layer generation:** Z-range face filtering, loop stitching, OpenCV filling/PNG encoding, and reuse of unchanged/blank layer masks. Still produces same-size white, varnish and approximate colored boundary PNGs for every layer, plus a JSON job manifest.
 - Support hollow regions and warn about open geometry.
 - **Large jobs are supported without a fixed total-layer-pixel cap.** The slicer streams one raster layer at a time and saves it before moving to the next, rather than holding all layers in memory. A 60.021 mm tall, 0.05 mm, 300 DPI model can therefore generate 1,201 layers without the former 350-million-layer-pixel rejection.
@@ -75,13 +79,25 @@ For developer machines that already have Python, install requirements and pytest
 
 The production app doesn't rely on system Python. MIT licensed: see LICENSE.
 
+## Important support-material limitation
+
+**UV3D does not yet have a verified water-soluble support ink, a dedicated support printhead/channel, or a validated RIP mapping.** The grayscale support PNG is a *fourth conceptual material channel* and must not be sent to the Gongzheng printer as CMYK, white, or varnish. Ordinary white/varnish UV inks are not assumed water-soluble, and using them as support can permanently encase the part.
+
+The support algorithm fills all unsupported XY columns continuously down to the printbed. Unlike the conventional full rectangular support cube, its external footprint follows the outline of the highest model feature above each layer plus the selected casing width. This can save sacrificial volume, but has important caveats:
+
+- The entire shape is printed from the bed upward; the casing is a solid column-support envelope rather than hollow lattice support.
+- Support can become trapped inside completely enclosed internal cavities and cannot necessarily be washed away. Inspect the model for inaccessible spaces before attempting physical printing.
+- No unsupported air gaps are deliberately introduced between solid model pixels and support pixels. Real material separation, wetting, deposition, curing, inter-layer bonding, water-soluble material compatibility and printhead safety still require controlled experimentation.
+- The support volume saving percentage is relative to a rectangular block around the support footprint, not necessarily to any specific commercial printer's actual material consumption.
+- The sampled GPU wireframe is a viewing convenience; always use the full-resolution exported masks for judging actual layer geometry.
+
 ## Known limitations
 
 - Non-manifold/open meshes may produce incomplete polygons.
 - GPU display is un-decimated, but requires OpenGL 3.3 and enough video memory for the original mesh. Very large or per-face-colored meshes can use substantial video memory. Headless/software fallback previews remain simplified.
 - Height resizing is **uniform** rather than Z-only stretching; X and Y dimensions change proportionally. Changing model height now reuses the original preview mesh instead of reprocessing the entire file. Existing job previews are invalidated when height or slice settings change.
 - Textured mesh colors are not reproduced accurately. Surface colors are only approximated along visible layer boundaries.
-- White/varnish masks need verified mapping to real RIP spot channels.
+- White/varnish masks need verified mapping to real RIP spot channels. Support masks need **a separate soluble support chemistry, delivery channel and RIP mapping**, none currently verified.
 - Registration in actual printer coordinates, ink deposition, mechanical Z positioning, cured thickness, software travel limits, and collision protection need validation.
 - Nominal media thickness is not a verified free-standing 3D build volume.
 
