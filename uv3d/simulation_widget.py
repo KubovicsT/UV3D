@@ -26,6 +26,7 @@ from .simulation_engine import (
     PrintSimulation, TIMELINE_TICKS, format_sim_time,
 )
 from .support_surface import build_support_surface
+from .gantry import GantryConfig, load_gantry
 
 GPU_AVAILABLE = (sys.platform == "win32" and
                  os.environ.get("QT_QPA_PLATFORM", "").lower() not in ("offscreen", "minimal"))
@@ -147,6 +148,7 @@ class SimulationWidget(QWidget):
     def __init__(self, root: Path, parent=None, gpu_enabled=None):
         super().__init__(parent)
         self.root = Path(root)
+        self._gantry_config = load_gantry(self.root)
         if gpu_enabled is None:
             gpu_enabled = GPU_AVAILABLE
         self.gpu_enabled = bool(gpu_enabled and GPU_AVAILABLE)
@@ -415,7 +417,8 @@ class SimulationWidget(QWidget):
                 manifest, move_speed_mm_s=self.move_speed.value(),
                 print_speed_mm_s=self.print_speed.value(),
                 passes=self.print_passes.value(),
-                print_mode=self.print_mode.currentData())
+                print_mode=self.print_mode.currentData(),
+                gantry_config=self._gantry_config)
         except Exception as exc:
             self.detail.setText(f"Cannot open simulation job: {exc}")
             return
@@ -470,6 +473,7 @@ class SimulationWidget(QWidget):
         if self.viewport is not None and mesh is not None and payload is not None:
             self.viewport.set_simulation_scene(mesh,payload,self.manifest)
             self.viewport.set_support_surface(surface.triangles)
+            self.viewport.set_gantry_config(self._gantry_config)
             self._scene_ready = True
             self.viewport.set_simulation_passes(self.plan.passes)
             self.viewport.set_head_opacity(self.head_opacity.value() / 100)
@@ -580,8 +584,11 @@ class SimulationWidget(QWidget):
             f"{frame.motion_kind.upper()} · "
             f"{frame.layer_progress*100:.1f}% through layer. "
             f"Head X {hx:.1f}, Y {hy:.1f}, Z {hz:.2f} mm · "
-            f"{frame.rows_per_layer} swath bands × {self.plan.passes} passes "
+            f"{frame.rows_per_layer} print bands × {self.plan.passes} passes "
             f"({self.print_mode.currentText().split(' — ')[0]}). "
+            f"Carriage: {sum(h.enabled for h in self._gantry_config.heads)} heads, "
+            f"{sum(l.enabled for l in self._gantry_config.lamps)} UV lamps. "
+            f"{'UV curing' if frame.curing else 'Deposition/travel'}; "
             f"Based on one i3200-U1 (69.1 × 59.5 × 35.6 mm); "
             "3-head arrangement, real acceleration/UV curing not calibrated.")
         if update_viewport and self.viewport is not None and self._scene_ready:
@@ -652,6 +659,18 @@ class SimulationWidget(QWidget):
                 self._scrub_timer.start()
         else:
             self._update_frame()
+
+    def set_gantry_config(self, config: GantryConfig):
+        """Update entire virtual carriage, UV cure route and estimated time."""
+        self._gantry_config = GantryConfig.from_dict(config.as_dict())
+        if self.plan is not None:
+            fraction = self.elapsed / self.plan.total_seconds
+            self.plan.set_gantry_config(self._gantry_config)
+            self.elapsed = fraction * self.plan.total_seconds
+            self._last_clock = time.monotonic()
+        if self.viewport is not None:
+            self.viewport.set_gantry_config(self._gantry_config)
+        self._update_frame()
 
     def speed_changed(self,value):
         if self.plan is None:
