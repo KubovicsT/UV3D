@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication
 
 from uv3d.gpu_viewport import prepare_gpu_geometry
 from uv3d.simulation_engine import PrintSimulation
+from uv3d.gantry import default_gantry
 from uv3d.simulation_viewport import SimulationViewport
 
 
@@ -45,6 +46,8 @@ def main():
         app.processEvents()
     if not viewport._gpu_ready:
         raise RuntimeError("No OpenGL 3.3 core context: " + repr(errors))
+    gantry = default_gantry()
+    viewport.set_gantry_config(gantry)
     viewport.set_simulation_scene(mesh, prepare_gpu_geometry(mesh), manifest)
     # A small 3D support wall, 2 triangles.
     wall = np.array([
@@ -55,7 +58,10 @@ def main():
     viewport.set_support_tint((165,112,220),.28)
     viewport.set_model_tint((220,185,155))
     viewport.set_show_future(True)
-    plan = PrintSimulation(manifest)
+    plan = PrintSimulation(manifest, gantry_config=gantry, passes=2)
+    viewport.set_simulation_passes(plan.passes)
+    viewport.set_head_opacity(.4)
+    viewport.set_current_layer_colors((255,140,40),(35,230,250))
     for n in range(180):
         frame = plan.get_frame((n*73 % 180)/179)
         body = np.zeros((36,42),dtype=np.uint8)
@@ -71,7 +77,8 @@ def main():
             raise RuntimeError("OpenGL playback error:\n" + "\n".join(errors))
     viewport.close()
     app.processEvents()
-    print("Real OpenGL simulation rendering and 180 non-sequential seeks: PASS")
+    assert any(seg.kind == "cure" for seg in plan.segments)
+    print("Real OpenGL multihead/UV-lamp rendering and 180 non-sequential seeks: PASS")
 
 
 if __name__ == "__main__":
