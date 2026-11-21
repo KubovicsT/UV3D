@@ -68,8 +68,12 @@ def test_lamp_sweeps_add_duration_cover_all_xy_and_obey_travel_speed(example_job
     assert all(s.speed_mm_s == 500 for s in cure)
     for before, after in zip(with_lamp.segments, with_lamp.segments[1:]):
         assert before.end_xyz == pytest.approx(after.start_xyz)
-    assert min(s.start_xyz[0] for s in cure) <= -65-5
-    assert max(s.end_xyz[0] for s in cure) >= 20-65+5
+    # UV coverage is based on the *lamp's footprint*, not its housing or
+    # a printhead-style overscan. A 10 mm lamp on 20 mm raster sweeps its
+    # center from raster X=5 to X=15, minus the lamp's X=65 offset.
+    for segment in cure:
+        assert {round(segment.start_xyz[0], 3),
+                round(segment.end_xyz[0], 3)} == {-60.0, -50.0}
 
 
 def test_lamp_position_size_count_and_cure_passes_affect_route(example_job):
