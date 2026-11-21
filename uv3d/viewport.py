@@ -17,7 +17,8 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
 from .core import _face_colors, _polygons_from_segments
-from .navigation import orbit as supp_orbit, zoom as supp_zoom, preset as camera_preset
+from .navigation import (orbit as supp_orbit, zoom as supp_zoom,
+                         preset as camera_preset, pan_focal_delta)
 
 
 def clip_triangle_below(triangle: np.ndarray, z: float) -> np.ndarray:
@@ -170,6 +171,7 @@ class ModelViewport(QWidget):
         self.yaw, self.pitch = camera_preset('Isometric')
         self.zoom = 1.0
         self.pan = np.zeros(2, dtype=float)
+        self.pan_world = np.zeros(3, dtype=float)
         self._last_pos = None
         self._drag_button = None
         self.slice_mode = False
@@ -227,6 +229,7 @@ class ModelViewport(QWidget):
         self.yaw, self.pitch = camera_preset('Isometric')
         self.zoom = 1.0
         self.pan[:] = 0
+        self.pan_world[:] = 0
         self.update()
 
     def set_view_preset(self, name):
@@ -235,6 +238,7 @@ class ModelViewport(QWidget):
             return
         self.yaw, self.pitch = camera_preset(name)
         self.pan[:] = 0
+        self.pan_world[:] = 0
         self.update()
 
     def set_slice_mode(self, active: bool) -> None:
@@ -319,7 +323,11 @@ class ModelViewport(QWidget):
         if self._drag_button == Qt.RightButton:
             self.yaw, self.pitch = supp_orbit(self.yaw, self.pitch, delta.x(), delta.y())
         elif self._drag_button == Qt.MiddleButton:
-            self.pan += np.array([delta.x(), delta.y()], dtype=float)
+            dims = self.mesh.extents if self.mesh is not None else [10., 10., 10.]
+            max_dim = max(float(max(dims[:2])), float(dims[2]) * 1.45, 1e-4)
+            px = min(self.width(), self.height()) * .63 / max_dim * self.zoom
+            self.pan_world += np.asarray(pan_focal_delta(
+                self.yaw, self.pitch, delta.x(), delta.y(), px))
         else:
             return  # left click reserved for selection and 3D manipulation
         self.update()
@@ -342,7 +350,7 @@ class ModelViewport(QWidget):
         bmin, bmax = self.mesh.bounds
         mid = (bmin + bmax) * 0.5
         middle = np.array([mid[0], mid[1], float(dims[2]) * 0.48])
-        xyz = pts - middle
+        xyz = pts - (middle + self.pan_world)
         cy, sy = math.cos(self.yaw), math.sin(self.yaw)
         cp, sp = math.cos(self.pitch), math.sin(self.pitch)
         sideways = cy * xyz[:, 0] - sy * xyz[:, 1]
